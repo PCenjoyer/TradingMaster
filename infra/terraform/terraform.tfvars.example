@@ -1,0 +1,13 @@
+aws_region          = "eu-central-1"
+environment         = "dev"
+single_nat_gateway  = true
+node_capacity_type  = "SPOT"
+node_instance_types = ["t3.medium", "t3a.medium"]
+node_min_size       = 1
+node_desired_size   = 2
+node_max_size       = 4
+
+# По умолчанию Kubernetes API доступен только внутри VPC.
+# Для временного публичного доступа включите параметр и укажите только свой CIDR /32.
+# endpoint_public_access       = true
+# endpoint_public_access_cidrs = ["203.0.113.10/32"]

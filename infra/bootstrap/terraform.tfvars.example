@@ -1,0 +1,2 @@
+aws_region        = "eu-central-1"
+state_bucket_name = "tradingmaster-terraform-state-ЗАМЕНИТЕ"

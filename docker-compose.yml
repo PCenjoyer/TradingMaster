@@ -1,0 +1,21 @@
+services:
+  tradingmaster:
+    build:
+      context: .
+      args:
+        VERSION: local
+    image: tradingmaster:local
+    environment:
+      TM_MODE: api
+      TM_HTTP_ADDR: :8080
+    ports:
+      - "8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    restart: unless-stopped

@@ -51,7 +51,7 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 func (s *Server) status(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"service": "TradingMaster", "version": s.version,
-		"mode": "исследование и paper-trading", "live_trading": false,
+		"mode": "исследование и бэктест", "live_trading": false,
 	})
 }
 

@@ -1,0 +1,25 @@
+/bin/
+/.idea/
+/.vscode/
+*.log
+*.out
+*.test
+.env
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+!*.tfvars.example
+
+# Секреты и локальные данные
+*.pem
+*.key
+secrets/
+data/

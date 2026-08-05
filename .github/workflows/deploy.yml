@@ -1,0 +1,56 @@
+name: Развёртывание в EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Тег контейнера из GHCR, например 0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Развернуть
+    runs-on: [self-hosted, linux, x64]
+    environment: production
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Получить временные AWS-права через OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Установить kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+        with:
+          version: v1.36.1
+      - name: Настроить доступ к EKS
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+        env:
+          EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+      - name: Подготовить манифесты с выбранным образом
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Недопустимый тег контейнера"
+            exit 1
+          fi
+          kubectl kustomize deploy/k8s > rendered.yaml
+          sed -i "s|ghcr.io/pcenjoyer/tradingmaster:latest|ghcr.io/pcenjoyer/tradingmaster:$IMAGE_TAG|" rendered.yaml
+      - name: Применить манифесты
+        run: kubectl apply -f rendered.yaml
+      - name: Дождаться готовности
+        run: kubectl -n tradingmaster rollout status deployment/tradingmaster --timeout=5m
