@@ -9,10 +9,12 @@ TradingMaster — собственный движок алгоритмическ
 - event-driven бэктест без look-ahead: сигнал формируется на закрытии, исполняется на следующем открытии;
 - собственная трендовая стратегия: Donchian breakout, SMA-фильтр и ATR;
 - размер позиции по допустимому риску, ATR-стоп, trailing stop и ограничение просадки;
+- ручной kill switch и автоматический дневной лимит убытка с блокировкой новых позиций;
+- защищённый admin API, fail-safe запуск и Telegram-уведомления о переключениях защиты;
 - комиссии, проскальзывание и гэпы через стоп;
 - метрики: доходность, максимальная просадка, Sharpe, profit factor, win rate и экспозиция;
 - загрузка OHLCV из CSV и HTTP API для запуска бэктестов;
-- Prometheus-совместимые метрики и health/readiness endpoints;
+- Prometheus-совместимые метрики, alert rules и готовый Grafana dashboard;
 - минимальный non-root контейнер, Docker Compose и защищённые Kubernetes-манифесты;
 - Terraform для VPC, Amazon EKS, managed nodes, ECR и защищённого S3 state;
 - CI для Go, контейнера, Kubernetes и Terraform;
@@ -27,12 +29,17 @@ go test ./...
 go run ./cmd/tradingmaster -mode api
 ~~~
 
+Для локального safety API скопируйте [.env.example](.env.example) в файл .env и задайте длинный случайный admin token. Docker Compose подхватит файл автоматически.
+
 После запуска:
 
 - GET http://localhost:8080/healthz — жив ли процесс;
 - GET http://localhost:8080/readyz — готов ли сервис;
 - GET http://localhost:8080/api/v1/status — режим и версия;
 - POST http://localhost:8080/api/v1/backtests — бэктест массива свечей;
+- GET http://localhost:8080/api/v1/safety — состояние защиты, требуется Bearer admin token;
+- POST http://localhost:8080/api/v1/safety/kill-switch — ручная блокировка или разблокировка;
+- POST http://localhost:8080/api/v1/safety/equity — обновление equity для дневного лимита;
 - GET http://localhost:8080/metrics — метрики.
 
 Запуск в контейнере:
@@ -64,7 +71,8 @@ timestamp,open,high,low,close,volume
 3. волатильность и защитный стоп рассчитываются через ATR(14);
 4. выход — пробой минимума предыдущих 10 свечей либо trailing stop;
 5. базовый риск — 1% капитала на сделку, позиция — не более 25% капитала;
-6. после просадки 15% новые входы блокируются до перезапуска тестового контура.
+6. после просадки 15% новые входы блокируются до перезапуска тестового контура;
+7. после дневного убытка 3% новые входы блокируются до следующего UTC-дня.
 
 Параметры API настраиваются в каждом запросе. Подробные формулы, допущения и ограничения: [docs/strategy.md](docs/strategy.md).
 
@@ -94,7 +102,9 @@ Terraform создаёт:
 - ECR с immutable tags, шифрованием, сканированием и lifecycle policy;
 - отдельный S3 bucket для versioned и locked Terraform state.
 
-Kubernetes запускает два экземпляра приложения с restricted Pod Security, non-root UID, read-only root filesystem, удалёнными Linux capabilities, resource limits, probes, PDB, HPA и NetworkPolicy.
+Kubernetes запускает один fail-safe экземпляр приложения с restricted Pod Security, non-root UID, read-only root filesystem, удалёнными Linux capabilities, resource limits, probes, PDB и NetworkPolicy. Горизонтальное масштабирование намеренно ограничено одной репликой, пока kill switch не вынесен в общий durable store.
+
+Опциональный каталог [monitoring](monitoring) содержит ServiceMonitor, PrometheusRule и русский Grafana dashboard «TradingMaster — безопасность».
 
 Порядок подготовки AWS, оценка расходов и развёртывание: [docs/operations.md](docs/operations.md).
 
@@ -106,6 +116,7 @@ go test ./...
 go vet ./...
 go build -trimpath ./cmd/tradingmaster
 kubectl kustomize deploy/k8s
+kubectl kustomize monitoring
 ~~~
 
 CI запускает аналогичные проверки на каждом PR. Тег v* публикует multi-arch образ в ghcr.io/pcenjoyer/tradingmaster. Развёртывание запускается вручную workflow «Развёртывание в EKS», чтобы случайный push не менял production.
@@ -113,6 +124,7 @@ CI запускает аналогичные проверки на каждом 
 ## Безопасность и источники
 
 - Секреты не хранятся в Git: AWS-доступ для CD выдаётся краткоживущим OIDC-токеном.
+- Admin token и Telegram credentials загружаются только из окружения или Kubernetes Secret.
 - Kubernetes-профиль следует официальному [Restricted Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/).
 - Terraform state использует [S3 locking через lockfile](https://developer.hashicorp.com/terraform/language/backend/s3), а бакет имеет versioning и запрет публичного доступа.
 - Подключение к закрытому EKS описано в [документации AWS](https://docs.aws.amazon.com/eks/latest/userguide/create-kubeconfig.html).

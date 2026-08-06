@@ -71,9 +71,13 @@ jobs:
           version: v1.36.1
       - name: Собрать манифесты
         run: kubectl kustomize deploy/k8s > rendered.yaml
+      - name: Собрать мониторинг
+        run: kubectl kustomize monitoring > monitoring-rendered.yaml
+      - name: Проверить JSON Grafana
+        run: python -m json.tool monitoring/grafana/tradingmaster-safety.json > /dev/null
       - name: Проверить результат сборки
         shell: bash
-        run: test -s rendered.yaml
+        run: test -s rendered.yaml && test -s monitoring-rendered.yaml
 
   terraform:
     name: Terraform

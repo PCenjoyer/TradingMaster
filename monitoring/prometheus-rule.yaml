@@ -1,0 +1,36 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tradingmaster-safety
+  namespace: tradingmaster
+  labels:
+    app.kubernetes.io/name: tradingmaster
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: tradingmaster.safety
+      rules:
+        - alert: TradingMasterKillSwitchActive
+          expr: max(tradingmaster_kill_switch_active) == 1
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "TradingMaster: kill switch активен"
+            description: "Новые торговые позиции заблокированы. Проверьте причину через защищённый safety API."
+        - alert: TradingMasterDailyLossNearLimit
+          expr: max(tradingmaster_daily_loss_ratio) / clamp_min(max(tradingmaster_daily_loss_limit_ratio), 0.000001) >= 0.8
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: дневной убыток приблизился к лимиту"
+            description: "Использовано не менее 80% настроенного дневного лимита убытка."
+        - alert: TradingMasterTelegramDeliveryFailed
+          expr: sum(increase(tradingmaster_telegram_notifications_total{status="failed"}[5m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: ошибка Telegram-уведомления"
+            description: "Хотя бы одно safety-уведомление не было доставлено в Telegram за последние 5 минут."

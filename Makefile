@@ -1,4 +1,4 @@
-.PHONY: format test vet build run k8s-render terraform-check
+.PHONY: format test vet build run k8s-render monitoring-render terraform-check
 
 format:
 	gofmt -w ./cmd ./internal
@@ -17,6 +17,9 @@ run:
 
 k8s-render:
 	kubectl kustomize deploy/k8s
+
+monitoring-render:
+	kubectl kustomize monitoring
 
 terraform-check:
 	terraform -chdir=infra/terraform fmt -check -recursive

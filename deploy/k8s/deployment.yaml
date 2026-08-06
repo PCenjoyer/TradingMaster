@@ -6,7 +6,8 @@ metadata:
   labels:
     app.kubernetes.io/name: tradingmaster
 spec:
-  replicas: 2
+  # До подключения общего durable safety-store сервис намеренно однорепличный.
+  replicas: 1
   revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
@@ -44,6 +45,25 @@ spec:
           envFrom:
             - configMapRef:
                 name: tradingmaster
+          env:
+            - name: TM_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: tradingmaster-secrets
+                  key: admin-token
+                  optional: true
+            - name: TM_TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: tradingmaster-secrets
+                  key: telegram-bot-token
+                  optional: true
+            - name: TM_TELEGRAM_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: tradingmaster-secrets
+                  key: telegram-chat-id
+                  optional: true
           ports:
             - name: http
               containerPort: 8080

@@ -100,7 +100,7 @@ func (e *Engine) Run(candles []domain.Candle) (domain.BacktestResult, error) {
 			equity += position.Quantity * candle.Close
 			exposedBars++
 		}
-		e.risk.UpdateEquity(equity)
+		e.risk.UpdateEquity(candle.Time, equity)
 		curve = append(curve, domain.EquityPoint{Time: candle.Time, Equity: equity})
 
 		signal := e.strategy.Evaluate(candles[:i+1], position != nil)
@@ -122,8 +122,10 @@ func (e *Engine) Run(candles []domain.Candle) (domain.BacktestResult, error) {
 		curve[len(curve)-1].Equity = cash
 	}
 
+	statistics := calculateStatistics(e.config.InitialCapital, cash, candles, curve, trades, exposedBars)
+	statistics.DailyLossStops = e.risk.DailyLossStops()
 	return domain.BacktestResult{
-		Statistics:  calculateStatistics(e.config.InitialCapital, cash, candles, curve, trades, exposedBars),
+		Statistics:  statistics,
 		Trades:      trades,
 		EquityCurve: curve,
 	}, nil

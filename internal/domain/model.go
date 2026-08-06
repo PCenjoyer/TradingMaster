@@ -82,6 +82,7 @@ type Statistics struct {
 	Exposure         float64 `json:"exposure"`
 	Trades           int     `json:"trades"`
 	ProfitableTrades int     `json:"profitable_trades"`
+	DailyLossStops   int     `json:"daily_loss_stops"`
 }
 
 type BacktestResult struct {

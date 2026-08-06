@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/PCenjoyer/TradingMaster/internal/alert"
 	"github.com/PCenjoyer/TradingMaster/internal/backtest"
 	"github.com/PCenjoyer/TradingMaster/internal/httpapi"
 	"github.com/PCenjoyer/TradingMaster/internal/marketdata"
@@ -49,7 +51,32 @@ func run() error {
 
 func serve(address string) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	api := httpapi.NewServer(logger, version)
+	dailyLossLimit, err := envFloat("TM_DAILY_LOSS_LIMIT", 0.03)
+	if err != nil {
+		return err
+	}
+	notifier, err := notifierFromEnv()
+	if err != nil {
+		return err
+	}
+	adminToken := os.Getenv("TM_ADMIN_TOKEN")
+	initialKillSwitch, err := envBool("TM_KILL_SWITCH_DEFAULT", false)
+	if err != nil {
+		return err
+	}
+	if adminToken == "" {
+		logger.Warn("административный API безопасности отключён: TM_ADMIN_TOKEN не настроен")
+	}
+	if !notifier.Enabled() {
+		logger.Warn("Telegram-уведомления отключены")
+	}
+	api, err := httpapi.NewServer(logger, version, httpapi.Config{
+		AdminToken: adminToken, DailyLossLimit: dailyLossLimit,
+		InitialKillSwitch: initialKillSwitch, Notifier: notifier,
+	})
+	if err != nil {
+		return fmt.Errorf("настроить API: %w", err)
+	}
 	server := &http.Server{
 		Addr: address, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 20 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 90 * time.Second,
@@ -124,4 +151,40 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envFloat(name string, fallback float64) (float64, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s должно быть числом: %w", name, err)
+	}
+	return value, nil
+}
+
+func envBool(name string, fallback bool) (bool, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s должно быть true или false: %w", name, err)
+	}
+	return value, nil
+}
+
+func notifierFromEnv() (alert.Notifier, error) {
+	token := os.Getenv("TM_TELEGRAM_BOT_TOKEN")
+	chatID := os.Getenv("TM_TELEGRAM_CHAT_ID")
+	if token == "" && chatID == "" {
+		return alert.Noop{}, nil
+	}
+	if token == "" || chatID == "" {
+		return nil, fmt.Errorf("TM_TELEGRAM_BOT_TOKEN и TM_TELEGRAM_CHAT_ID должны быть заданы вместе")
+	}
+	return alert.NewTelegram(alert.TelegramConfig{BotToken: token, ChatID: chatID})
 }
