@@ -1,25 +1,13 @@
 {
   "annotations": {
-    "list": [
-      {
-        "builtIn": 1,
-        "datasource": {
-          "type": "grafana",
-          "uid": "-- Grafana --"
-        },
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Аннотации",
-        "type": "dashboard"
-      }
-    ]
+    "list": []
   },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
   "links": [],
+  "liveNow": false,
   "panels": [
     {
       "datasource": {
@@ -37,7 +25,7 @@
                 },
                 "1": {
                   "color": "red",
-                  "text": "Блокировка активна"
+                  "text": "Новые позиции заблокированы"
                 }
               },
               "type": "value"
@@ -61,7 +49,7 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 0
       },
@@ -78,14 +66,12 @@
           "fields": "",
           "values": false
         },
-        "textMode": "value"
+        "textMode": "value_and_name"
       },
       "targets": [
         {
-          "editorMode": "code",
           "expr": "max(tradingmaster_kill_switch_active)",
           "legendFormat": "Kill switch",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -99,10 +85,80 @@
       },
       "fieldConfig": {
         "defaults": {
-          "max": 0.05,
-          "min": 0,
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "Локальная память"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "PostgreSQL"
+                }
+              },
+              "type": "value"
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "expr": "min(tradingmaster_safety_store_durable)",
+          "legendFormat": "Safety-store",
+          "refId": "A"
+        }
+      ],
+      "title": "Общее хранилище защиты",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "percentage",
             "steps": [
               {
                 "color": "green",
@@ -110,11 +166,11 @@
               },
               {
                 "color": "orange",
-                "value": 0.024
+                "value": 80
               },
               {
                 "color": "red",
-                "value": 0.03
+                "value": 100
               }
             ]
           },
@@ -124,12 +180,14 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 12,
         "y": 0
       },
-      "id": 2,
+      "id": 3,
       "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -139,18 +197,17 @@
           "values": false
         },
         "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        "showThresholdMarkers": true,
+        "sizing": "auto"
       },
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "max(tradingmaster_daily_loss_ratio)",
-          "legendFormat": "Дневной убыток",
-          "range": true,
+          "expr": "max(tradingmaster_daily_loss_ratio) / clamp_min(max(tradingmaster_daily_loss_limit_ratio), 0.000001)",
+          "legendFormat": "Использовано лимита",
           "refId": "A"
         }
       ],
-      "title": "Дневной убыток",
+      "title": "Использование дневного лимита",
       "type": "gauge"
     },
     {
@@ -160,28 +217,60 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 12,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "showPoints": "never",
-            "spanNulls": false
-          },
+          "decimals": 2,
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "expr": "max(tradingmaster_paper_equity)",
+          "legendFormat": "Paper equity",
+          "refId": "A"
+        }
+      ],
+      "title": "Paper-портфель",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
           "unit": "percentunit"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
-        "w": 16,
+        "w": 12,
         "x": 0,
         "y": 6
       },
-      "id": 3,
+      "id": 5,
       "options": {
         "legend": {
           "calcs": [
@@ -193,22 +282,18 @@
         },
         "tooltip": {
           "mode": "multi",
-          "sort": "desc"
+          "sort": "none"
         }
       },
       "targets": [
         {
-          "editorMode": "code",
           "expr": "max(tradingmaster_daily_loss_ratio)",
-          "legendFormat": "Фактический убыток",
-          "range": true,
+          "legendFormat": "Дневной убыток",
           "refId": "A"
         },
         {
-          "editorMode": "code",
           "expr": "max(tradingmaster_daily_loss_limit_ratio)",
           "legendFormat": "Лимит",
-          "range": true,
           "refId": "B"
         }
       ],
@@ -222,117 +307,49 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 0
-      },
-      "id": 4,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "sum(increase(tradingmaster_telegram_notifications_total{status=\"failed\"}[1h]))",
-          "legendFormat": "Ошибки",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Ошибки Telegram за час",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 8,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
+          "min": 0,
           "unit": "short"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 12,
+        "x": 12,
         "y": 6
       },
-      "id": 5,
+      "id": 6,
       "options": {
         "legend": {
           "calcs": [
-            "lastNotNull"
+            "sum"
           ],
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "increase(tradingmaster_safety_transitions_total[1h])",
-          "legendFormat": "Переключения защиты",
-          "range": true,
+          "expr": "sum by (status) (increase(tradingmaster_paper_orders_total[15m]))",
+          "legendFormat": "{{status}}",
           "refId": "A"
         }
       ],
-      "title": "Переключения защиты за час",
+      "title": "Paper-заявки за 15 минут",
       "type": "timeseries"
     }
   ],
-  "refresh": "30s",
-  "schemaVersion": 41,
+  "refresh": "15s",
+  "schemaVersion": 40,
   "tags": [
     "tradingmaster",
-    "безопасность"
+    "безопасность",
+    "paper-trading"
   ],
   "templating": {
     "list": []
@@ -343,8 +360,8 @@
   },
   "timepicker": {},
   "timezone": "utc",
-  "title": "TradingMaster — безопасность",
+  "title": "TradingMaster — безопасность и paper-trading",
   "uid": "tradingmaster-safety",
-  "version": 1,
+  "version": 2,
   "weekStart": "monday"
 }

@@ -48,3 +48,16 @@ func TestEnvironmentParsers(t *testing.T) {
 		t.Fatalf("не распознан bool: %t, %v", active, err)
 	}
 }
+
+func TestPaperConfigFromEnvironment(t *testing.T) {
+	t.Setenv("TM_PAPER_INITIAL_CAPITAL", "25000")
+	t.Setenv("TM_PAPER_FEE_BPS", "8")
+	t.Setenv("TM_PAPER_SLIPPAGE_BPS", "3")
+	config, err := paperConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.InitialCapital != 25_000 || config.FeeBPS != 8 || config.SlippageBPS != 3 {
+		t.Fatalf("неожиданная paper-конфигурация: %#v", config)
+	}
+}

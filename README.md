@@ -1,6 +1,6 @@
 # TradingMaster
 
-TradingMaster — собственный движок алгоритмической торговли на Go. Текущая версия предназначена для исследования стратегий, воспроизводимых бэктестов и подготовки к paper-trading. Отправка реальных заявок на биржу намеренно отключена до появления отдельного адаптера, тестового контура и аварийных ограничителей.
+TradingMaster — собственный движок алгоритмической торговли на Go. Текущая версия предназначена для исследования стратегий, воспроизводимых бэктестов и paper-trading. Отправка реальных заявок на биржу намеренно отключена до появления live-адаптера и reconciliation с биржей.
 
 > Важно: проект не обещает доходность и не является инвестиционной рекомендацией. Результаты на истории не гарантируют будущий результат. Сначала используйте только исторические данные и тестовый счёт.
 
@@ -11,12 +11,14 @@ TradingMaster — собственный движок алгоритмическ
 - размер позиции по допустимому риску, ATR-стоп, trailing stop и ограничение просадки;
 - ручной kill switch и автоматический дневной лимит убытка с блокировкой новых позиций;
 - защищённый admin API, fail-safe запуск и Telegram-уведомления о переключениях защиты;
+- общий durable safety-store в PostgreSQL с атомарной координацией нескольких экземпляров;
+- paper broker с рыночными заявками, портфелем и append-only журналом заявок и исполнений;
 - комиссии, проскальзывание и гэпы через стоп;
 - метрики: доходность, максимальная просадка, Sharpe, profit factor, win rate и экспозиция;
 - загрузка OHLCV из CSV и HTTP API для запуска бэктестов;
 - Prometheus-совместимые метрики, alert rules и готовый Grafana dashboard;
 - минимальный non-root контейнер, Docker Compose и защищённые Kubernetes-манифесты;
-- Terraform для VPC, Amazon EKS, managed nodes, ECR и защищённого S3 state;
+- Terraform для VPC, Amazon EKS, RDS PostgreSQL, managed nodes, ECR и защищённого S3 state;
 - CI для Go, контейнера, Kubernetes и Terraform;
 - CD в GHCR по тегам и ручное развёртывание выбранной версии в EKS через GitHub OIDC.
 
@@ -40,6 +42,10 @@ go run ./cmd/tradingmaster -mode api
 - GET http://localhost:8080/api/v1/safety — состояние защиты, требуется Bearer admin token;
 - POST http://localhost:8080/api/v1/safety/kill-switch — ручная блокировка или разблокировка;
 - POST http://localhost:8080/api/v1/safety/equity — обновление equity для дневного лимита;
+- POST http://localhost:8080/api/v1/paper/orders — отправка paper-заявки;
+- GET http://localhost:8080/api/v1/paper/orders — журнал заявок и исполнений;
+- GET http://localhost:8080/api/v1/paper/portfolio — текущий тестовый портфель;
+- POST http://localhost:8080/api/v1/paper/marks — обновление рыночной цены и safety equity;
 - GET http://localhost:8080/metrics — метрики.
 
 Запуск в контейнере:
@@ -47,6 +53,8 @@ go run ./cmd/tradingmaster -mode api
 ~~~bash
 docker compose up --build
 ~~~
+
+Compose поднимает приложение и PostgreSQL. Схема применяется автоматически под advisory lock; повторный запуск сохраняет safety-state, портфель и журнал в named volume.
 
 Запуск бэктеста из CSV:
 
@@ -87,6 +95,8 @@ flowchart LR
     F --> M["Сделки и метрики"]
     A["HTTP API"] --> E
     M --> A
+    P["Paper broker"] --> J["PostgreSQL: safety и журнал"]
+    A --> P
 ~~~
 
 Границы компонентов и путь к live-trading описаны в [docs/architecture.md](docs/architecture.md).
@@ -100,11 +110,12 @@ Terraform создаёт:
 - EKS 1.36 с закрытым API endpoint по умолчанию;
 - managed node group на Spot-инстансах для dev;
 - ECR с immutable tags, шифрованием, сканированием и lifecycle policy;
+- закрытый RDS PostgreSQL с шифрованием, резервными копиями и паролем под управлением Secrets Manager;
 - отдельный S3 bucket для versioned и locked Terraform state.
 
-Kubernetes запускает один fail-safe экземпляр приложения с restricted Pod Security, non-root UID, read-only root filesystem, удалёнными Linux capabilities, resource limits, probes, PDB и NetworkPolicy. Горизонтальное масштабирование намеренно ограничено одной репликой, пока kill switch не вынесен в общий durable store.
+Kubernetes запускает от двух до шести экземпляров приложения с общим PostgreSQL safety-state, restricted Pod Security, non-root UID, read-only root filesystem, удалёнными Linux capabilities, resource limits, probes, PDB, HPA и NetworkPolicy. Без обязательного секрета `database-url` pod не запускается.
 
-Опциональный каталог [monitoring](monitoring) содержит ServiceMonitor, PrometheusRule и русский Grafana dashboard «TradingMaster — безопасность».
+Опциональный каталог [monitoring](monitoring) содержит ServiceMonitor, PrometheusRule и русский Grafana dashboard «TradingMaster — безопасность и paper-trading».
 
 Порядок подготовки AWS, оценка расходов и развёртывание: [docs/operations.md](docs/operations.md).
 
@@ -119,15 +130,15 @@ kubectl kustomize deploy/k8s
 kubectl kustomize monitoring
 ~~~
 
-CI запускает аналогичные проверки на каждом PR. Тег v* публикует multi-arch образ в ghcr.io/pcenjoyer/tradingmaster. Развёртывание запускается вручную workflow «Развёртывание в EKS», чтобы случайный push не менял production.
+CI запускает аналогичные проверки на каждом PR и поднимает отдельный PostgreSQL для интеграционного теста миграций, блокировок, paper broker и append-only журнала. Тег v* публикует multi-arch образ в ghcr.io/pcenjoyer/tradingmaster. Развёртывание запускается вручную workflow «Развёртывание в EKS», чтобы случайный push не менял production.
 
 ## Безопасность и источники
 
 - Секреты не хранятся в Git: AWS-доступ для CD выдаётся краткоживущим OIDC-токеном.
-- Admin token и Telegram credentials загружаются только из окружения или Kubernetes Secret.
+- Database URL, admin token и Telegram credentials загружаются только из окружения или Kubernetes Secret.
 - Kubernetes-профиль следует официальному [Restricted Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/).
 - Terraform state использует [S3 locking через lockfile](https://developer.hashicorp.com/terraform/language/backend/s3), а бакет имеет versioning и запрет публичного доступа.
 - Подключение к закрытому EKS описано в [документации AWS](https://docs.aws.amazon.com/eks/latest/userguide/create-kubeconfig.html).
 - CFTC отдельно предупреждает, что торговые боты не способны гарантировать доходность: [Customer Advisory](https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/AITradingBots.html).
 
-Проект распространяется по лицензии MIT. См. [LICENSE](LICENSE).
+Проект распространяется по лицензии MIT. См. [LICENSE](LICENSE). Уведомления о лицензиях встроенных Go-модулей находятся в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) и копируются в контейнерный образ.

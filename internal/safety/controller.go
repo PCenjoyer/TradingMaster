@@ -1,10 +1,17 @@
 package safety
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
+)
+
+var (
+	ErrTradingBlocked = errors.New("открытие новых позиций заблокировано")
+	ErrStaleEquity    = errors.New("устаревшее equity-наблюдение")
 )
 
 type Config struct {
@@ -17,6 +24,7 @@ type State struct {
 	Active           bool      `json:"active"`
 	ManualActive     bool      `json:"manual_active"`
 	DailyLimitActive bool      `json:"daily_limit_active"`
+	DurableStorage   bool      `json:"durable_storage"`
 	Reason           string    `json:"reason"`
 	TradingDay       string    `json:"trading_day,omitempty"`
 	DayStartEquity   float64   `json:"day_start_equity"`
@@ -34,9 +42,7 @@ type Transition struct {
 	Time    time.Time
 }
 
-type Controller struct {
-	mu               sync.RWMutex
-	dailyLossLimit   float64
+type storedState struct {
 	manualActive     bool
 	manualReason     string
 	dailyLimitActive bool
@@ -44,27 +50,47 @@ type Controller struct {
 	dayStartEquity   float64
 	currentEquity    float64
 	dailyLossRatio   float64
+	dailyLossLimit   float64
 	updatedAt        time.Time
 	lastEquityAt     time.Time
 }
 
-func NewController(config Config) (*Controller, error) {
-	if config.DailyLossLimit <= 0 || config.DailyLossLimit >= 1 {
-		return nil, fmt.Errorf("дневной лимит убытка должен быть в диапазоне (0; 1)")
-	}
-	controller := &Controller{dailyLossLimit: config.DailyLossLimit}
-	if config.InitialActive {
-		controller.manualActive = true
-		controller.manualReason = strings.TrimSpace(config.InitialReason)
-		if controller.manualReason == "" {
-			controller.manualReason = "безопасная блокировка при запуске"
-		}
-		controller.updatedAt = time.Now().UTC()
-	}
-	return controller, nil
+type stateBackend interface {
+	Read(context.Context) (storedState, error)
+	Update(context.Context, func(*storedState) error) (storedState, error)
+	WithLock(context.Context, func(context.Context, storedState) error) error
+	Durable() bool
 }
 
-func (c *Controller) Activate(reason string, at time.Time) (State, Transition, error) {
+type Controller struct {
+	backend stateBackend
+}
+
+func NewController(config Config) (*Controller, error) {
+	initial, err := initialState(config)
+	if err != nil {
+		return nil, err
+	}
+	return &Controller{backend: &memoryBackend{state: initial}}, nil
+}
+
+func initialState(config Config) (storedState, error) {
+	if config.DailyLossLimit <= 0 || config.DailyLossLimit >= 1 {
+		return storedState{}, fmt.Errorf("дневной лимит убытка должен быть в диапазоне (0; 1)")
+	}
+	state := storedState{dailyLossLimit: config.DailyLossLimit}
+	if config.InitialActive {
+		state.manualActive = true
+		state.manualReason = strings.TrimSpace(config.InitialReason)
+		if state.manualReason == "" {
+			state.manualReason = "безопасная блокировка при запуске"
+		}
+		state.updatedAt = time.Now().UTC()
+	}
+	return state, nil
+}
+
+func (c *Controller) Activate(ctx context.Context, reason string, at time.Time) (State, Transition, error) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return State{}, Transition{}, fmt.Errorf("причина ручной блокировки обязательна")
@@ -72,35 +98,47 @@ func (c *Controller) Activate(reason string, at time.Time) (State, Transition, e
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
-	c.mu.Lock()
-	changed := !c.manualActive || c.manualReason != reason
-	c.manualActive = true
-	c.manualReason = reason
-	c.updatedAt = at.UTC()
-	state := c.stateLocked()
-	c.mu.Unlock()
-	return state, Transition{Changed: changed, Active: state.Active, Engaged: true, Cause: reason, Time: at.UTC()}, nil
+	at = at.UTC()
+	changed := false
+	stored, err := c.backend.Update(ctx, func(current *storedState) error {
+		changed = !current.manualActive || current.manualReason != reason
+		current.manualActive = true
+		current.manualReason = reason
+		current.updatedAt = at
+		return nil
+	})
+	if err != nil {
+		return State{}, Transition{}, fmt.Errorf("активировать kill switch: %w", err)
+	}
+	state := publicState(stored, c.backend.Durable())
+	return state, Transition{Changed: changed, Active: state.Active, Engaged: true, Cause: reason, Time: at}, nil
 }
 
-func (c *Controller) Deactivate(at time.Time) (State, Transition) {
+func (c *Controller) Deactivate(ctx context.Context, at time.Time) (State, Transition, error) {
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
-	c.mu.Lock()
-	changed := c.manualActive
-	c.manualActive = false
-	c.manualReason = ""
-	c.updatedAt = at.UTC()
-	state := c.stateLocked()
+	at = at.UTC()
+	changed := false
+	stored, err := c.backend.Update(ctx, func(current *storedState) error {
+		changed = current.manualActive
+		current.manualActive = false
+		current.manualReason = ""
+		current.updatedAt = at
+		return nil
+	})
+	if err != nil {
+		return State{}, Transition{}, fmt.Errorf("снять ручной kill switch: %w", err)
+	}
+	state := publicState(stored, c.backend.Durable())
 	cause := "ручная блокировка снята"
 	if state.DailyLimitActive {
 		cause += "; дневной лимит остаётся активным"
 	}
-	c.mu.Unlock()
-	return state, Transition{Changed: changed, Active: state.Active, Engaged: false, Cause: cause, Time: at.UTC()}
+	return state, Transition{Changed: changed, Active: state.Active, Engaged: false, Cause: cause, Time: at}, nil
 }
 
-func (c *Controller) ObserveEquity(at time.Time, equity float64) (State, Transition, error) {
+func (c *Controller) ObserveEquity(ctx context.Context, at time.Time, equity float64) (State, Transition, error) {
 	if at.IsZero() {
 		return State{}, Transition{}, fmt.Errorf("время equity обязательно")
 	}
@@ -109,78 +147,136 @@ func (c *Controller) ObserveEquity(at time.Time, equity float64) (State, Transit
 	}
 	at = at.UTC()
 	day := at.Format(time.DateOnly)
+	transition := Transition{Time: at}
 
-	c.mu.Lock()
-	if !c.lastEquityAt.IsZero() && at.Before(c.lastEquityAt) {
-		c.mu.Unlock()
-		return State{}, Transition{}, fmt.Errorf("устаревшее equity-наблюдение: последнее время %s", c.lastEquityAt.Format(time.RFC3339))
-	}
-	wasDailyActive := c.dailyLimitActive
-	if c.tradingDay != day {
-		c.tradingDay = day
-		c.dayStartEquity = equity
-		c.dailyLimitActive = false
-		c.dailyLossRatio = 0
-	}
-	c.currentEquity = equity
-	c.dailyLossRatio = 0
-	if c.dayStartEquity > 0 && equity < c.dayStartEquity {
-		c.dailyLossRatio = (c.dayStartEquity - equity) / c.dayStartEquity
-	}
-	if c.dailyLossRatio >= c.dailyLossLimit {
-		c.dailyLimitActive = true
-	}
-	c.updatedAt = at
-	c.lastEquityAt = at
-	state := c.stateLocked()
+	stored, err := c.backend.Update(ctx, func(current *storedState) error {
+		if !current.lastEquityAt.IsZero() && at.Before(current.lastEquityAt) {
+			return fmt.Errorf("%w: последнее время %s", ErrStaleEquity, current.lastEquityAt.Format(time.RFC3339))
+		}
+		wasDailyActive := current.dailyLimitActive
+		if current.tradingDay != day {
+			current.tradingDay = day
+			current.dayStartEquity = equity
+			current.dailyLimitActive = false
+			current.dailyLossRatio = 0
+		}
+		current.currentEquity = equity
+		current.dailyLossRatio = 0
+		if current.dayStartEquity > 0 && equity < current.dayStartEquity {
+			current.dailyLossRatio = (current.dayStartEquity - equity) / current.dayStartEquity
+		}
+		if current.dailyLossRatio >= current.dailyLossLimit {
+			current.dailyLimitActive = true
+		}
+		current.updatedAt = at
+		current.lastEquityAt = at
 
-	transition := Transition{Time: at, Active: state.Active}
-	if !wasDailyActive && c.dailyLimitActive {
-		transition.Changed = true
-		transition.Engaged = true
-		transition.Cause = fmt.Sprintf(
-			"дневной убыток %.2f%% достиг лимита %.2f%%",
-			c.dailyLossRatio*100,
-			c.dailyLossLimit*100,
-		)
-	} else if wasDailyActive && !c.dailyLimitActive {
-		transition.Changed = true
-		transition.Engaged = false
-		transition.Cause = "начался новый торговый день; автоматическая блокировка снята"
+		switch {
+		case !wasDailyActive && current.dailyLimitActive:
+			transition.Changed = true
+			transition.Engaged = true
+			transition.Cause = fmt.Sprintf(
+				"дневной убыток %.2f%% достиг лимита %.2f%%",
+				current.dailyLossRatio*100,
+				current.dailyLossLimit*100,
+			)
+		case wasDailyActive && !current.dailyLimitActive:
+			transition.Changed = true
+			transition.Cause = "начался новый торговый день; автоматическая блокировка снята"
+		}
+		return nil
+	})
+	if err != nil {
+		return State{}, Transition{}, fmt.Errorf("обновить equity: %w", err)
 	}
-	c.mu.Unlock()
+	state := publicState(stored, c.backend.Durable())
+	transition.Active = state.Active
 	return state, transition, nil
 }
 
-func (c *Controller) State() State {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.stateLocked()
-}
-
-func (c *Controller) CanOpenPosition() error {
-	state := c.State()
-	if state.Active {
-		return fmt.Errorf("новые позиции запрещены: %s", state.Reason)
+func (c *Controller) State(ctx context.Context) (State, error) {
+	stored, err := c.backend.Read(ctx)
+	if err != nil {
+		return State{}, fmt.Errorf("прочитать safety-state: %w", err)
 	}
-	return nil
+	return publicState(stored, c.backend.Durable()), nil
 }
 
-func (c *Controller) stateLocked() State {
-	active := c.manualActive || c.dailyLimitActive
+func (c *Controller) CanOpenPosition(ctx context.Context) error {
+	return c.WithOpenPermission(ctx, func(context.Context) error { return nil })
+}
+
+func (c *Controller) WithOpenPermission(ctx context.Context, operation func(context.Context) error) error {
+	return c.WithExecutionLock(ctx, true, operation)
+}
+
+func (c *Controller) WithExecutionLock(
+	ctx context.Context,
+	requireOpenPermission bool,
+	operation func(context.Context) error,
+) error {
+	return c.backend.WithLock(ctx, func(operationContext context.Context, stored storedState) error {
+		state := publicState(stored, c.backend.Durable())
+		if requireOpenPermission && state.Active {
+			return fmt.Errorf("%w: %s", ErrTradingBlocked, state.Reason)
+		}
+		if operation == nil {
+			return nil
+		}
+		return operation(operationContext)
+	})
+}
+
+func (c *Controller) Durable() bool {
+	return c.backend.Durable()
+}
+
+func publicState(stored storedState, durable bool) State {
+	active := stored.manualActive || stored.dailyLimitActive
 	reason := ""
 	switch {
-	case c.manualActive && c.dailyLimitActive:
-		reason = c.manualReason + "; превышен дневной лимит убытка"
-	case c.manualActive:
-		reason = c.manualReason
-	case c.dailyLimitActive:
+	case stored.manualActive && stored.dailyLimitActive:
+		reason = stored.manualReason + "; превышен дневной лимит убытка"
+	case stored.manualActive:
+		reason = stored.manualReason
+	case stored.dailyLimitActive:
 		reason = "превышен дневной лимит убытка"
 	}
 	return State{
-		Active: active, ManualActive: c.manualActive, DailyLimitActive: c.dailyLimitActive,
-		Reason: reason, TradingDay: c.tradingDay, DayStartEquity: c.dayStartEquity,
-		CurrentEquity: c.currentEquity, DailyLossRatio: c.dailyLossRatio,
-		DailyLossLimit: c.dailyLossLimit, UpdatedAt: c.updatedAt,
+		Active: active, ManualActive: stored.manualActive, DailyLimitActive: stored.dailyLimitActive,
+		DurableStorage: durable, Reason: reason, TradingDay: stored.tradingDay,
+		DayStartEquity: stored.dayStartEquity, CurrentEquity: stored.currentEquity,
+		DailyLossRatio: stored.dailyLossRatio, DailyLossLimit: stored.dailyLossLimit,
+		UpdatedAt: stored.updatedAt,
 	}
 }
+
+type memoryBackend struct {
+	mu    sync.RWMutex
+	state storedState
+}
+
+func (m *memoryBackend) Read(context.Context) (storedState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.state, nil
+}
+
+func (m *memoryBackend) Update(_ context.Context, mutation func(*storedState) error) (storedState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copy := m.state
+	if err := mutation(&copy); err != nil {
+		return storedState{}, err
+	}
+	m.state = copy
+	return copy, nil
+}
+
+func (m *memoryBackend) WithLock(ctx context.Context, operation func(context.Context, storedState) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return operation(ctx, m.state)
+}
+
+func (*memoryBackend) Durable() bool { return false }

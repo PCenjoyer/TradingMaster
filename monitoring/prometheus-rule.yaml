@@ -34,3 +34,19 @@ spec:
           annotations:
             summary: "TradingMaster: ошибка Telegram-уведомления"
             description: "Хотя бы одно safety-уведомление не было доставлено в Telegram за последние 5 минут."
+        - alert: TradingMasterSafetyStoreIsNotDurable
+          expr: min(tradingmaster_safety_store_durable) == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "TradingMaster: durable safety-store отключён"
+            description: "Хотя бы один экземпляр использует локальный safety-state. Paper trading и масштабирование небезопасны."
+        - alert: TradingMasterPaperOrderErrors
+          expr: sum(increase(tradingmaster_paper_orders_total{status="error"}[5m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: ошибки paper broker"
+            description: "За последние 5 минут paper broker не смог обработать хотя бы одну заявку."

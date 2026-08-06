@@ -18,6 +18,40 @@ type Metrics struct {
 	safetyTransitions atomic.Uint64
 	alertsSent        atomic.Uint64
 	alertsFailed      atomic.Uint64
+	durableStore      atomic.Uint32
+	paperEquity       atomic.Uint64
+	paperFilled       atomic.Uint64
+	paperRejected     atomic.Uint64
+	paperErrors       atomic.Uint64
+}
+
+func (m *Metrics) SetSafetyUnavailable() {
+	if previous := m.killSwitch.Swap(1); previous != 1 {
+		m.safetyTransitions.Add(1)
+	}
+}
+
+func (m *Metrics) SetDurableStore(enabled bool) {
+	var value uint32
+	if enabled {
+		value = 1
+	}
+	m.durableStore.Store(value)
+}
+
+func (m *Metrics) SetPaperEquity(equity float64) {
+	m.paperEquity.Store(math.Float64bits(equity))
+}
+
+func (m *Metrics) ObservePaperOrder(status string) {
+	switch status {
+	case "filled":
+		m.paperFilled.Add(1)
+	case "rejected":
+		m.paperRejected.Add(1)
+	default:
+		m.paperErrors.Add(1)
+	}
 }
 
 func (m *Metrics) SetSafety(active bool, dailyLoss, dailyLimit float64) {
@@ -75,9 +109,22 @@ func (m *Metrics) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 			"# HELP tradingmaster_telegram_notifications_total Результат отправки Telegram-уведомлений.\n"+
 			"# TYPE tradingmaster_telegram_notifications_total counter\n"+
 			"tradingmaster_telegram_notifications_total{status=\"sent\"} %d\n"+
-			"tradingmaster_telegram_notifications_total{status=\"failed\"} %d\n",
+			"tradingmaster_telegram_notifications_total{status=\"failed\"} %d\n"+
+			"# HELP tradingmaster_safety_store_durable Используется ли общее durable-хранилище safety-state.\n"+
+			"# TYPE tradingmaster_safety_store_durable gauge\n"+
+			"tradingmaster_safety_store_durable %d\n"+
+			"# HELP tradingmaster_paper_equity Текущая equity paper-портфеля.\n"+
+			"# TYPE tradingmaster_paper_equity gauge\n"+
+			"tradingmaster_paper_equity %.8f\n"+
+			"# HELP tradingmaster_paper_orders_total Результаты обработки paper-заявок.\n"+
+			"# TYPE tradingmaster_paper_orders_total counter\n"+
+			"tradingmaster_paper_orders_total{status=\"filled\"} %d\n"+
+			"tradingmaster_paper_orders_total{status=\"rejected\"} %d\n"+
+			"tradingmaster_paper_orders_total{status=\"error\"} %d\n",
 		m.backtests.Load(), m.errors.Load(), m.duration.Load(), m.killSwitch.Load(),
 		math.Float64frombits(m.dailyLoss.Load()), math.Float64frombits(m.dailyLimit.Load()),
 		m.safetyTransitions.Load(), m.alertsSent.Load(), m.alertsFailed.Load(),
+		m.durableStore.Load(), math.Float64frombits(m.paperEquity.Load()),
+		m.paperFilled.Load(), m.paperRejected.Load(), m.paperErrors.Load(),
 	)
 }

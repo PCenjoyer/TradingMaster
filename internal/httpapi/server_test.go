@@ -10,8 +10,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PCenjoyer/TradingMaster/internal/alert"
+	"github.com/PCenjoyer/TradingMaster/internal/paper"
 )
 
 func TestHealth(t *testing.T) {
@@ -83,11 +85,53 @@ func TestNotificationFailureDoesNotRollbackKillSwitch(t *testing.T) {
 	}
 }
 
+func TestPaperOrderEndpoint(t *testing.T) {
+	broker := &fakePaperBroker{portfolio: paper.Portfolio{Cash: 9_899, Equity: 9_999, Positions: []paper.Position{}}}
+	server := newTestServer(t, Config{AdminToken: "secret", DailyLossLimit: 0.03, Paper: broker})
+	response := postAuthorized(t, server.Handler(), "/api/v1/paper/orders", `{
+		"symbol":"BTCUSDT","side":"buy","quantity":1,"market_price":100
+	}`)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"status":"filled"`) {
+		t.Fatalf("paper-заявка не принята: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPaperEndpointDisabledWithoutDatabase(t *testing.T) {
+	server := newTestServer(t, Config{AdminToken: "secret", DailyLossLimit: 0.03})
+	response := postAuthorized(t, server.Handler(), "/api/v1/paper/orders", `{
+		"symbol":"BTCUSDT","side":"buy","quantity":1,"market_price":100
+	}`)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ожидался код 503, получен %d: %s", response.Code, response.Body.String())
+	}
+}
+
 type recordingNotifier struct {
 	events []alert.Event
 }
 
 type failingNotifier struct{}
+
+type fakePaperBroker struct {
+	portfolio paper.Portfolio
+}
+
+func (*fakePaperBroker) Enabled() bool { return true }
+func (b *fakePaperBroker) Mark(context.Context, paper.MarkRequest) (paper.MarkResult, error) {
+	return paper.MarkResult{Portfolio: b.portfolio}, nil
+}
+func (*fakePaperBroker) Orders(context.Context, int) ([]paper.Order, error) {
+	return []paper.Order{}, nil
+}
+func (b *fakePaperBroker) Portfolio(context.Context) (paper.Portfolio, error) {
+	return b.portfolio, nil
+}
+func (*fakePaperBroker) Submit(_ context.Context, request paper.SubmitRequest) (paper.Order, error) {
+	return paper.Order{
+		ID: "test-order", CreatedAt: time.Now().UTC(), Symbol: request.Symbol, Side: request.Side,
+		OrderType: "market", Quantity: request.Quantity, MarketPrice: request.MarketPrice, Status: paper.StatusFilled,
+	}, nil
+}
 
 func (failingNotifier) Enabled() bool { return true }
 func (failingNotifier) Notify(context.Context, alert.Event) error {

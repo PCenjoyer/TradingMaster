@@ -6,8 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: tradingmaster
 spec:
-  # До подключения общего durable safety-store сервис намеренно однорепличный.
-  replicas: 1
+  replicas: 2
   revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
@@ -46,6 +45,11 @@ spec:
             - configMapRef:
                 name: tradingmaster
           env:
+            - name: TM_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: tradingmaster-secrets
+                  key: database-url
             - name: TM_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:

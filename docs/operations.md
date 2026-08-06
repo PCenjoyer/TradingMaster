@@ -2,13 +2,13 @@
 
 ## Предварительные требования
 
-- AWS CLI с правами на S3, VPC, IAM, EKS, EC2 и ECR;
+- AWS CLI с правами на S3, VPC, IAM, EKS, EC2, ECR, RDS и Secrets Manager;
 - Terraform 1.10+;
 - kubectl 1.36;
 - уникальное имя S3 bucket;
 - заранее проверенный бюджет AWS.
 
-EKS, EC2, NAT Gateway и трафик оплачиваются отдельно. single_nat_gateway = true и Spot nodes уменьшают стоимость dev, но не являются production-конфигурацией. Перед terraform apply обязательно изучите plan.
+EKS, EC2, RDS, Secrets Manager, NAT Gateway и трафик оплачиваются отдельно. `single_nat_gateway = true`, однозонный RDS и Spot nodes уменьшают стоимость dev, но не являются production-конфигурацией. Для production включите Multi-AZ, deletion protection и финальный snapshot. Перед terraform apply обязательно изучите plan.
 
 ## 1. Создать хранилище Terraform state
 
@@ -39,6 +39,8 @@ terraform -chdir=infra/terraform apply dev.tfplan
 aws eks update-kubeconfig --region eu-central-1 --name tradingmaster-dev
 kubectl get nodes
 ~~~
+
+Terraform также создаёт закрытый RDS PostgreSQL. Пароль генерируется RDS и хранится в Secrets Manager, а в Terraform state не записывается как входная переменная.
 
 ## 3. Опубликовать версию
 
@@ -79,19 +81,36 @@ curl http://localhost:8080/api/v1/status
 curl http://localhost:8080/metrics
 ~~~
 
-## 6. Настроить kill switch и Telegram
+## 6. Настроить PostgreSQL, kill switch и Telegram
 
-Сгенерируйте длинный случайный admin token и создайте Kubernetes Secret. Значения не добавляются в Git:
+Получите endpoint и управляемый RDS secret, соберите URL с корректным percent-encoding и создайте Kubernetes Secret. Команды не записывают пароль в Git:
 
 ~~~bash
+DB_HOST="$(terraform -chdir=infra/terraform output -raw postgres_endpoint)"
+DB_SECRET_ARN="$(terraform -chdir=infra/terraform output -raw postgres_master_secret_arn)"
+DB_SECRET_JSON="$(aws secretsmanager get-secret-value \
+  --secret-id "$DB_SECRET_ARN" --query SecretString --output text)"
+DATABASE_URL="$(DB_HOST="$DB_HOST" DB_SECRET_JSON="$DB_SECRET_JSON" python3 -c '
+import json, os, urllib.parse
+secret = json.loads(os.environ["DB_SECRET_JSON"])
+user = urllib.parse.quote(secret["username"], safe="")
+password = urllib.parse.quote(secret["password"], safe="")
+host = os.environ["DB_HOST"]
+print(f"postgres://{user}:{password}@{host}:5432/tradingmaster?sslmode=require")
+')"
+
 kubectl -n tradingmaster create secret generic tradingmaster-secrets \
+  --from-literal=database-url="$DATABASE_URL" \
   --from-literal=admin-token="ЗАМЕНИТЕ" \
   --from-literal=telegram-bot-token="ЗАМЕНИТЕ" \
-  --from-literal=telegram-chat-id="ЗАМЕНИТЕ"
-kubectl -n tradingmaster rollout restart deployment/tradingmaster
+  --from-literal=telegram-chat-id="ЗАМЕНИТЕ" \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset DATABASE_URL DB_SECRET_JSON DB_SECRET_ARN DB_HOST
 ~~~
 
-Если Telegram не нужен, не передавайте оба telegram-параметра. Если admin token отсутствует, mutating safety API возвращает HTTP 503. Kubernetes-конфигурация стартует с TM_KILL_SWITCH_DEFAULT=true, поэтому после рестарта новые торговые позиции по умолчанию запрещены.
+Если Telegram не нужен, не передавайте оба telegram-параметра. `database-url` обязателен для Kubernetes Deployment. При первом создании строки safety-state действует `TM_KILL_SWITCH_DEFAULT=true`; последующие рестарты восстанавливают сохранённое состояние. Несколько pod’ов используют одну блокируемую строку PostgreSQL.
+
+Kubernetes Secret содержит снимок учётных данных. После ротации RDS master secret повторите создание секрета и выполните `kubectl rollout restart deployment/tradingmaster`. Для production лучше подключить External Secrets и отдельного application user с минимальными правами, а миграции запускать отдельной учётной записью.
 
 Пример проверки через port-forward:
 
@@ -125,7 +144,32 @@ curl -X POST \
 
 Дневная автоматическая блокировка не снимается ручной командой в течение того же UTC-дня. Telegram-сбой не откатывает kill switch и виден в метрике tradingmaster_telegram_notifications_total.
 
-## 7. Подключить Prometheus и Grafana
+## 7. Проверить paper trading
+
+Все paper endpoints требуют тот же Bearer admin token. Покупка открывает или увеличивает позицию, продажа уменьшает её. Активный kill switch отклоняет покупку, но не мешает продаже:
+
+~~~bash
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"BTCUSDT","side":"buy","quantity":0.01,"market_price":60000}' \
+  http://localhost:8080/api/v1/paper/orders
+
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"BTCUSDT","price":59000}' \
+  http://localhost:8080/api/v1/paper/marks
+
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost:8080/api/v1/paper/portfolio
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:8080/api/v1/paper/orders?limit=50'
+~~~
+
+Каждое исполнение атомарно меняет cash и позицию, а затем добавляется в append-only журнал. Рыночная цена передаётся вызывающей стороной: это детерминированный paper-адаптер, а не подключение к биржевому стакану.
+
+## 8. Подключить Prometheus и Grafana
 
 Каталог monitoring требует CRD от Prometheus Operator, например установленного kube-prometheus-stack:
 
@@ -133,13 +177,13 @@ curl -X POST \
 kubectl apply -k monitoring
 ~~~
 
-ServiceMonitor и PrometheusRule по умолчанию имеют label release=kube-prometheus-stack. Если Helm release называется иначе, замените label перед применением. Grafana sidecar обнаруживает ConfigMap по label grafana_dashboard=1 и загружает dashboard «TradingMaster — безопасность».
+ServiceMonitor и PrometheusRule по умолчанию имеют label release=kube-prometheus-stack. Если Helm release называется иначе, замените label перед применением. Grafana sidecar обнаруживает ConfigMap по label grafana_dashboard=1 и загружает dashboard «TradingMaster — безопасность и paper-trading».
 
-Dashboard показывает kill switch, дневной убыток, лимит, переключения защиты и ошибки Telegram. Prometheus создаёт critical alert при активной блокировке и warning при использовании 80% дневного лимита.
+Dashboard показывает kill switch, тип safety-store, дневной убыток, paper equity и результаты заявок. Prometheus создаёт critical alert при активной блокировке или локальном safety-store и warning при использовании 80% дневного лимита.
 
 ## Ограничение текущей версии
 
-Safety-state пока хранится в памяти одного процесса. Чтобы не получить расходящееся состояние между pod’ами, Deployment и HPA ограничены одной репликой. При рестарте сервис снова входит в fail-safe блокировку. До реализации общего durable store увеличивать число реплик или включать live trading нельзя.
+Paper broker не отправляет заявки на биржу и принимает цену исполнения от вызывающей стороны. Пока нет idempotency key, биржевого market-data adapter, reconciliation и outbox, включать live trading нельзя. `/api/v1/status` поэтому продолжает возвращать `live_trading: false`.
 
 ## Откат
 

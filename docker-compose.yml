@@ -13,6 +13,13 @@ services:
       TM_ADMIN_TOKEN: ${TM_ADMIN_TOKEN:-}
       TM_TELEGRAM_BOT_TOKEN: ${TM_TELEGRAM_BOT_TOKEN:-}
       TM_TELEGRAM_CHAT_ID: ${TM_TELEGRAM_CHAT_ID:-}
+      TM_DATABASE_URL: ${TM_DATABASE_URL:-postgres://tradingmaster:tradingmaster-local@postgres:5432/tradingmaster?sslmode=disable}
+      TM_PAPER_INITIAL_CAPITAL: ${TM_PAPER_INITIAL_CAPITAL:-10000}
+      TM_PAPER_FEE_BPS: ${TM_PAPER_FEE_BPS:-10}
+      TM_PAPER_SLIPPAGE_BPS: ${TM_PAPER_SLIPPAGE_BPS:-5}
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
     read_only: true
@@ -24,3 +31,22 @@ services:
       - no-new-privileges:true
     pids_limit: 128
     restart: unless-stopped
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: tradingmaster
+      POSTGRES_USER: tradingmaster
+      POSTGRES_PASSWORD: tradingmaster-local
+    volumes:
+      - tradingmaster-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradingmaster -d tradingmaster"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  tradingmaster-postgres:

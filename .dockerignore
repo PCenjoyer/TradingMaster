@@ -9,4 +9,5 @@ docs
 infra
 monitoring
 *.md
+!THIRD_PARTY_NOTICES.md
 *.tfstate*

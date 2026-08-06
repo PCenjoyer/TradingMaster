@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/PCenjoyer/TradingMaster/internal/backtest"
 	"github.com/PCenjoyer/TradingMaster/internal/domain"
 	"github.com/PCenjoyer/TradingMaster/internal/observability"
+	"github.com/PCenjoyer/TradingMaster/internal/paper"
 	"github.com/PCenjoyer/TradingMaster/internal/risk"
 	"github.com/PCenjoyer/TradingMaster/internal/safety"
 	"github.com/PCenjoyer/TradingMaster/internal/strategy"
@@ -36,6 +38,8 @@ type Config struct {
 	DailyLossLimit    float64
 	InitialKillSwitch bool
 	Notifier          alert.Notifier
+	Safety            *safety.Controller
+	Paper             paper.Broker
 }
 
 func DefaultConfig() Config {
@@ -47,6 +51,7 @@ type Server struct {
 	metrics    *observability.Metrics
 	safety     *safety.Controller
 	notifier   alert.Notifier
+	paper      paper.Broker
 	adminToken string
 	version    string
 }
@@ -62,22 +67,37 @@ func NewServer(logger *slog.Logger, version string, configs ...Config) (*Server,
 			config.Notifier = alert.Noop{}
 		}
 	}
-	controller, err := safety.NewController(safety.Config{
-		DailyLossLimit: config.DailyLossLimit,
-		InitialActive:  config.InitialKillSwitch,
-		InitialReason:  "безопасная блокировка при запуске сервиса",
-	})
+	controller := config.Safety
+	if controller == nil {
+		var err error
+		controller, err = safety.NewController(safety.Config{
+			DailyLossLimit: config.DailyLossLimit,
+			InitialActive:  config.InitialKillSwitch,
+			InitialReason:  "безопасная блокировка при запуске сервиса",
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	metrics := &observability.Metrics{}
+	state, err := controller.State(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	metrics := &observability.Metrics{}
-	state := controller.State()
 	metrics.SetSafety(state.Active, state.DailyLossRatio, state.DailyLossLimit)
+	metrics.SetDurableStore(controller.Durable())
+	if config.Paper != nil && config.Paper.Enabled() {
+		portfolio, portfolioErr := config.Paper.Portfolio(context.Background())
+		if portfolioErr != nil {
+			return nil, fmt.Errorf("прочитать начальный paper-портфель: %w", portfolioErr)
+		}
+		metrics.SetPaperEquity(portfolio.Equity)
+	}
 	server := &Server{
 		logger: logger, metrics: metrics, safety: controller, notifier: config.Notifier,
-		adminToken: config.AdminToken, version: version,
+		paper: config.Paper, adminToken: config.AdminToken, version: version,
 	}
-	if state.Active {
+	if state.Active && !controller.Durable() {
 		server.notifyTransition(safety.Transition{
 			Changed: true, Active: true, Engaged: true,
 			Cause: state.Reason, Time: state.UpdatedAt,
@@ -89,13 +109,17 @@ func NewServer(logger *slog.Logger, version string, configs ...Config) (*Server,
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
-	mux.HandleFunc("GET /readyz", s.health)
+	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/status", s.status)
 	mux.HandleFunc("POST /api/v1/backtests", s.backtest)
 	mux.HandleFunc("GET /api/v1/safety", s.requireAdmin(s.safetyStatus))
 	mux.HandleFunc("POST /api/v1/safety/kill-switch", s.requireAdmin(s.killSwitch))
 	mux.HandleFunc("POST /api/v1/safety/equity", s.requireAdmin(s.observeEquity))
-	mux.Handle("GET /metrics", s.metrics)
+	mux.HandleFunc("POST /api/v1/paper/orders", s.requireAdmin(s.paperOrder))
+	mux.HandleFunc("GET /api/v1/paper/orders", s.requireAdmin(s.paperOrders))
+	mux.HandleFunc("GET /api/v1/paper/portfolio", s.requireAdmin(s.paperPortfolio))
+	mux.HandleFunc("POST /api/v1/paper/marks", s.requireAdmin(s.paperMark))
+	mux.HandleFunc("GET /metrics", s.metricsEndpoint)
 	return s.recoverPanic(s.logRequests(mux))
 }
 
@@ -103,19 +127,66 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]string{"status": "работает"})
 }
 
-func (s *Server) status(writer http.ResponseWriter, _ *http.Request) {
-	safetyState := s.safety.State()
+func (s *Server) ready(writer http.ResponseWriter, request *http.Request) {
+	state, err := s.safety.State(request.Context())
+	if err != nil {
+		s.metrics.SetSafetyUnavailable()
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"status": "safety-store недоступен"})
+		return
+	}
+	s.observeSafetyState(state)
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "готов"})
+}
+
+func (s *Server) status(writer http.ResponseWriter, request *http.Request) {
+	safetyState, err := s.safety.State(request.Context())
+	storageAvailable := err == nil
+	if err != nil {
+		s.metrics.SetSafetyUnavailable()
+		safetyState.Active = true
+	} else {
+		s.observeSafetyState(safetyState)
+	}
+	paperEnabled := s.paper != nil && s.paper.Enabled()
+	mode := "исследование и бэктест"
+	if paperEnabled {
+		mode = "исследование, бэктест и paper-trading"
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"service": "TradingMaster", "version": s.version,
-		"mode": "исследование и бэктест", "live_trading": false,
-		"kill_switch_active":   safetyState.Active,
-		"safety_admin_enabled": s.adminToken != "",
-		"telegram_enabled":     s.notifier.Enabled(),
+		"mode": mode, "live_trading": false,
+		"kill_switch_active":     safetyState.Active,
+		"durable_safety_store":   s.safety.Durable(),
+		"safety_store_available": storageAvailable,
+		"safety_admin_enabled":   s.adminToken != "",
+		"telegram_enabled":       s.notifier.Enabled(),
+		"paper_trading":          paperEnabled,
 	})
 }
 
-func (s *Server) safetyStatus(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, s.safety.State())
+func (s *Server) metricsEndpoint(writer http.ResponseWriter, request *http.Request) {
+	state, err := s.safety.State(request.Context())
+	if err != nil {
+		s.metrics.SetSafetyUnavailable()
+	} else {
+		s.observeSafetyState(state)
+	}
+	if s.paper != nil && s.paper.Enabled() {
+		if portfolio, portfolioErr := s.paper.Portfolio(request.Context()); portfolioErr == nil {
+			s.metrics.SetPaperEquity(portfolio.Equity)
+		}
+	}
+	s.metrics.ServeHTTP(writer, request)
+}
+
+func (s *Server) safetyStatus(writer http.ResponseWriter, request *http.Request) {
+	state, err := s.safety.State(request.Context())
+	if err != nil {
+		s.metrics.SetSafetyUnavailable()
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "safety-store недоступен"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, state)
 }
 
 func (s *Server) killSwitch(writer http.ResponseWriter, request *http.Request) {
@@ -135,14 +206,25 @@ func (s *Server) killSwitch(writer http.ResponseWriter, request *http.Request) {
 	)
 	switch payload.Action {
 	case "activate":
-		state, transition, err = s.safety.Activate(payload.Reason, now)
+		if strings.TrimSpace(payload.Reason) == "" {
+			writeJSON(writer, http.StatusUnprocessableEntity, map[string]string{
+				"error": "для активации обязательна причина",
+			})
+			return
+		}
+		state, transition, err = s.safety.Activate(request.Context(), payload.Reason, now)
 	case "deactivate":
-		state, transition = s.safety.Deactivate(now)
+		state, transition, err = s.safety.Deactivate(request.Context(), now)
 	default:
-		err = fmt.Errorf("action должен быть activate или deactivate")
+		writeJSON(writer, http.StatusUnprocessableEntity, map[string]string{
+			"error": "action должен быть activate или deactivate",
+		})
+		return
 	}
 	if err != nil {
-		writeError(writer, http.StatusUnprocessableEntity, "команда kill switch отклонена", err)
+		s.metrics.SetSafetyUnavailable()
+		s.logger.Error("команда kill switch не сохранена", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "safety-store недоступен"})
 		return
 	}
 	s.observeSafetyState(state)
@@ -163,14 +245,144 @@ func (s *Server) observeEquity(writer http.ResponseWriter, request *http.Request
 	if payload.ObservedAt != nil {
 		observedAt = payload.ObservedAt.UTC()
 	}
-	state, transition, err := s.safety.ObserveEquity(observedAt, payload.Equity)
+	if observedAt.After(time.Now().UTC().Add(time.Minute)) {
+		writeJSON(writer, http.StatusUnprocessableEntity, map[string]string{
+			"error": "observed_at не может быть более чем на минуту в будущем",
+		})
+		return
+	}
+	if payload.Equity <= 0 {
+		writeJSON(writer, http.StatusUnprocessableEntity, map[string]string{"error": "equity должно быть положительным"})
+		return
+	}
+	state, transition, err := s.safety.ObserveEquity(request.Context(), observedAt, payload.Equity)
 	if err != nil {
-		writeError(writer, http.StatusUnprocessableEntity, "equity не принято", err)
+		if errors.Is(err, safety.ErrStaleEquity) {
+			writeError(writer, http.StatusConflict, "устаревшее equity не принято", err)
+			return
+		}
+		s.metrics.SetSafetyUnavailable()
+		s.logger.Error("equity не сохранено", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "safety-store недоступен"})
 		return
 	}
 	s.observeSafetyState(state)
 	s.notifyTransition(transition)
 	writeJSON(writer, http.StatusOK, state)
+}
+
+func (s *Server) paperOrder(writer http.ResponseWriter, request *http.Request) {
+	if !s.paperEnabled(writer) {
+		return
+	}
+	var payload paper.SubmitRequest
+	if err := decodeStrictJSON(writer, request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "некорректная paper-заявка", err)
+		return
+	}
+	order, err := s.paper.Submit(request.Context(), payload)
+	if errors.Is(err, paper.ErrInvalidRequest) {
+		writeError(writer, http.StatusUnprocessableEntity, "paper-заявка отклонена", err)
+		return
+	}
+	if err != nil {
+		s.logger.Error("paper-заявка не обработана", "ошибка", err)
+		s.metrics.ObservePaperOrder("error")
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "paper broker недоступен"})
+		return
+	}
+	s.metrics.ObservePaperOrder(order.Status)
+	if order.SafetyState != nil {
+		s.observeSafetyState(*order.SafetyState)
+	}
+	if order.SafetyTransition != nil {
+		s.notifyTransition(*order.SafetyTransition)
+	}
+	response := map[string]any{"order": order}
+	portfolio, portfolioErr := s.paper.Portfolio(request.Context())
+	if portfolioErr == nil {
+		s.metrics.SetPaperEquity(portfolio.Equity)
+		response["portfolio"] = portfolio
+	} else {
+		s.logger.Error("paper-заявка записана, но портфель не прочитан", "ошибка", portfolioErr)
+		response["warning"] = "заявка записана, но актуальный портфель не удалось прочитать"
+	}
+	status := http.StatusCreated
+	if order.Status == paper.StatusRejected {
+		status = http.StatusConflict
+	}
+	writeJSON(writer, status, response)
+}
+
+func (s *Server) paperOrders(writer http.ResponseWriter, request *http.Request) {
+	if !s.paperEnabled(writer) {
+		return
+	}
+	limit := 50
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 200 {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "limit должен быть от 1 до 200"})
+			return
+		}
+		limit = parsed
+	}
+	orders, err := s.paper.Orders(request.Context(), limit)
+	if err != nil {
+		s.logger.Error("не удалось прочитать журнал paper-заявок", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "paper broker недоступен"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"orders": orders})
+}
+
+func (s *Server) paperPortfolio(writer http.ResponseWriter, request *http.Request) {
+	if !s.paperEnabled(writer) {
+		return
+	}
+	portfolio, err := s.paper.Portfolio(request.Context())
+	if err != nil {
+		s.logger.Error("не удалось прочитать paper-портфель", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "paper broker недоступен"})
+		return
+	}
+	s.metrics.SetPaperEquity(portfolio.Equity)
+	writeJSON(writer, http.StatusOK, portfolio)
+}
+
+func (s *Server) paperMark(writer http.ResponseWriter, request *http.Request) {
+	if !s.paperEnabled(writer) {
+		return
+	}
+	var payload paper.MarkRequest
+	if err := decodeStrictJSON(writer, request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "некорректная рыночная цена", err)
+		return
+	}
+	result, err := s.paper.Mark(request.Context(), payload)
+	if err != nil {
+		if errors.Is(err, paper.ErrInvalidRequest) {
+			writeError(writer, http.StatusUnprocessableEntity, "рыночная цена отклонена", err)
+			return
+		}
+		s.logger.Error("не удалось обновить paper-цену", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "paper broker недоступен"})
+		return
+	}
+	s.metrics.SetPaperEquity(result.Portfolio.Equity)
+	s.observeSafetyState(result.SafetyState)
+	s.notifyTransition(result.Transition)
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (s *Server) paperEnabled(writer http.ResponseWriter) bool {
+	if s.paper == nil || !s.paper.Enabled() {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+			"error": "paper trading отключён: durable PostgreSQL не настроен",
+		})
+		return false
+	}
+	return true
 }
 
 func (s *Server) backtest(writer http.ResponseWriter, request *http.Request) {

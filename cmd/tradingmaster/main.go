@@ -16,9 +16,12 @@ import (
 
 	"github.com/PCenjoyer/TradingMaster/internal/alert"
 	"github.com/PCenjoyer/TradingMaster/internal/backtest"
+	"github.com/PCenjoyer/TradingMaster/internal/database"
 	"github.com/PCenjoyer/TradingMaster/internal/httpapi"
 	"github.com/PCenjoyer/TradingMaster/internal/marketdata"
+	"github.com/PCenjoyer/TradingMaster/internal/paper"
 	"github.com/PCenjoyer/TradingMaster/internal/risk"
+	"github.com/PCenjoyer/TradingMaster/internal/safety"
 	"github.com/PCenjoyer/TradingMaster/internal/strategy"
 )
 
@@ -70,9 +73,47 @@ func serve(address string) error {
 	if !notifier.Enabled() {
 		logger.Warn("Telegram-уведомления отключены")
 	}
+	safetyConfig := safety.Config{
+		DailyLossLimit: dailyLossLimit, InitialActive: initialKillSwitch,
+		InitialReason: "безопасная блокировка при запуске сервиса",
+	}
+	controller, err := safety.NewController(safetyConfig)
+	if err != nil {
+		return err
+	}
+	var paperBroker paper.Broker
+	databaseURL := os.Getenv("TM_DATABASE_URL")
+	if databaseURL == "" {
+		logger.Warn("PostgreSQL не настроен: safety-state хранится в памяти, paper trading отключён")
+	} else {
+		startupContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		pool, openErr := database.Open(startupContext, databaseURL)
+		if openErr != nil {
+			return openErr
+		}
+		defer pool.Close()
+		if err := database.Migrate(startupContext, pool); err != nil {
+			return err
+		}
+		controller, err = safety.NewPostgresController(startupContext, pool, safetyConfig)
+		if err != nil {
+			return err
+		}
+		paperConfig, configErr := paperConfigFromEnv()
+		if configErr != nil {
+			return configErr
+		}
+		paperBroker, err = paper.NewPostgresBroker(startupContext, pool, controller, paperConfig)
+		if err != nil {
+			return err
+		}
+		logger.Info("подключено общее PostgreSQL-хранилище", "paper_trading", true)
+	}
 	api, err := httpapi.NewServer(logger, version, httpapi.Config{
 		AdminToken: adminToken, DailyLossLimit: dailyLossLimit,
 		InitialKillSwitch: initialKillSwitch, Notifier: notifier,
+		Safety: controller, Paper: paperBroker,
 	})
 	if err != nil {
 		return fmt.Errorf("настроить API: %w", err)
@@ -187,4 +228,20 @@ func notifierFromEnv() (alert.Notifier, error) {
 		return nil, fmt.Errorf("TM_TELEGRAM_BOT_TOKEN и TM_TELEGRAM_CHAT_ID должны быть заданы вместе")
 	}
 	return alert.NewTelegram(alert.TelegramConfig{BotToken: token, ChatID: chatID})
+}
+
+func paperConfigFromEnv() (paper.Config, error) {
+	initialCapital, err := envFloat("TM_PAPER_INITIAL_CAPITAL", 10_000)
+	if err != nil {
+		return paper.Config{}, err
+	}
+	feeBPS, err := envFloat("TM_PAPER_FEE_BPS", 10)
+	if err != nil {
+		return paper.Config{}, err
+	}
+	slippageBPS, err := envFloat("TM_PAPER_SLIPPAGE_BPS", 5)
+	if err != nil {
+		return paper.Config{}, err
+	}
+	return paper.Config{InitialCapital: initialCapital, FeeBPS: feeBPS, SlippageBPS: slippageBPS}, nil
 }
