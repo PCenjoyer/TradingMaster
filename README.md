@@ -14,6 +14,7 @@ TradingMaster — собственный движок алгоритмическ
 - общий durable safety-store в PostgreSQL с атомарной координацией нескольких экземпляров;
 - paper broker с рыночными заявками, портфелем и append-only журналом заявок и исполнений;
 - Binance Spot Testnet с HMAC-подписью, идемпотентными client order ID, reconciliation и durable-журналом;
+- встроенная русская веб-панель без React: safety-контроль, paper-портфель и Binance Spot Testnet в том же Go-бинарнике;
 - комиссии, проскальзывание и гэпы через стоп;
 - метрики: доходность, максимальная просадка, Sharpe, profit factor, win rate и экспозиция;
 - загрузка OHLCV из CSV и HTTP API для запуска бэктестов;
@@ -36,6 +37,7 @@ go run ./cmd/tradingmaster -mode api
 
 После запуска:
 
+- GET http://localhost:8080/ui — русская панель управления с защищённой сессией;
 - GET http://localhost:8080/healthz — жив ли процесс;
 - GET http://localhost:8080/readyz — готов ли сервис;
 - GET http://localhost:8080/api/v1/status — режим и версия;
@@ -53,6 +55,8 @@ go run ./cmd/tradingmaster -mode api
 - GET http://localhost:8080/api/v1/testnet/orders — durable-журнал тестовых заявок;
 - POST http://localhost:8080/api/v1/testnet/orders/{idempotency_key}/reconcile — сверка неоднозначной заявки;
 - GET http://localhost:8080/metrics — метрики.
+
+Откройте http://localhost:8080/ui и войдите значением `TM_ADMIN_TOKEN`. Токен проверяется только при входе: браузер получает подписанную HttpOnly session cookie на 12 часов, а сам токен не записывается в `localStorage` или `sessionStorage`. Из панели можно управлять kill switch, видеть дневной лимит, работать с paper-портфелем и Binance Spot Testnet. Реальная торговля в интерфейсе отсутствует и программно отключена.
 
 Запуск в контейнере:
 
@@ -100,6 +104,7 @@ flowchart LR
     R --> F["Модель исполнения"]
     F --> M["Сделки и метрики"]
     A["HTTP API"] --> E
+    U["Русская веб-панель"] --> A
     M --> A
     P["Paper broker"] --> J["PostgreSQL: safety и журнал"]
     A --> P
@@ -144,6 +149,7 @@ CI запускает аналогичные проверки на каждом 
 
 - Секреты не хранятся в Git: AWS-доступ для CD выдаётся краткоживущим OIDC-токеном.
 - Database URL, admin token, Telegram credentials и тестовые биржевые ключи загружаются только из окружения или Kubernetes Secret.
+- Веб-панель использует HttpOnly SameSite=Strict cookie, CSRF-токен и строгую Content Security Policy; admin token не сохраняется в браузерном хранилище.
 - Testnet-адаптер принимает только `https://testnet.binance.vision`; production endpoint нельзя включить переменной окружения.
 - Kubernetes-профиль следует официальному [Restricted Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/).
 - Terraform state использует [S3 locking через lockfile](https://developer.hashicorp.com/terraform/language/backend/s3), а бакет имеет versioning и запрет публичного доступа.

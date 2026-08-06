@@ -81,6 +81,22 @@ curl http://localhost:8080/api/v1/status
 curl http://localhost:8080/metrics
 ~~~
 
+### Встроенная русская панель управления
+
+После `port-forward` откройте http://localhost:8080/ui и войдите значением `TM_ADMIN_TOKEN`. Отдельный frontend-сервис не требуется: HTML, CSS и JavaScript встроены в Go-бинарник и поставляются в том же контейнере.
+
+Панель показывает состояние сервиса, kill switch и дневной лимит, paper-портфель, позиции, журналы заявок, соединение и тестовые балансы Binance Spot Testnet. Из неё можно:
+
+- включить или снять ручной kill switch;
+- создать paper-заявку и обновить виртуальную рыночную цену;
+- отправить заявку только в Binance Spot Testnet и сверить неоднозначный статус.
+
+При входе admin token отправляется серверу формой и не сохраняется в `localStorage` или `sessionStorage`. Сервер выдаёт подписанную HttpOnly cookie со сроком 12 часов. Сессия не хранится в памяти pod и поэтому действует на всех репликах с одинаковым `TM_ADMIN_TOKEN`; ротация токена завершает ранее созданные сессии. Изменяющие запросы дополнительно защищены CSRF-токеном.
+
+В Kubernetes публикуйте панель только через HTTPS ingress. Тогда cookie получает флаг `Secure` по TLS или заголовку `X-Forwarded-Proto: https`. Локальный `http://localhost` оставлен рабочим только для разработки и `port-forward`.
+
+Панель намеренно показывает `LIVE OFF`: она не содержит production endpoint, не принимает реальные биржевые ключи и не может переключить `/api/v1/status` из `live_trading: false`.
+
 ## 6. Настроить PostgreSQL, kill switch и Telegram
 
 Получите endpoint и управляемый RDS secret, соберите URL с корректным percent-encoding и создайте Kubernetes Secret. Команды не записывают пароль в Git:

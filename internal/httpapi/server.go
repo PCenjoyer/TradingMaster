@@ -2,8 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,6 +55,7 @@ type Server struct {
 	testExchange testexchange.Broker
 	adminToken   string
 	version      string
+	ui           *uiController
 }
 
 func NewServer(logger *slog.Logger, version string, configs ...Config) (*Server, error) {
@@ -101,6 +100,10 @@ func NewServer(logger *slog.Logger, version string, configs ...Config) (*Server,
 		paper: config.Paper, testExchange: config.TestExchange,
 		adminToken: config.AdminToken, version: version,
 	}
+	server.ui, err = newUIController(config.AdminToken, version)
+	if err != nil {
+		return nil, err
+	}
 	if state.Active && !controller.Durable() {
 		server.notifyTransition(safety.Transition{
 			Changed: true, Active: true, Engaged: true,
@@ -112,6 +115,7 @@ func NewServer(logger *slog.Logger, version string, configs ...Config) (*Server,
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.ui.register(mux)
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/status", s.status)
@@ -582,20 +586,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		if s.adminToken == "" {
-			writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
-				"error": "административный API безопасности отключён: TM_ADMIN_TOKEN не настроен",
-			})
-			return
-		}
-		const prefix = "Bearer "
-		authorization := request.Header.Get("Authorization")
-		providedToken, found := strings.CutPrefix(authorization, prefix)
-		providedHash := sha256.Sum256([]byte(providedToken))
-		expectedHash := sha256.Sum256([]byte(s.adminToken))
-		if !found || subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) != 1 {
-			writer.Header().Set("WWW-Authenticate", "Bearer")
-			writeJSON(writer, http.StatusUnauthorized, map[string]string{"error": "требуется корректный admin token"})
+		if !s.ui.authorizeAPI(writer, request) {
 			return
 		}
 		next(writer, request)
