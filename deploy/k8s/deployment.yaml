@@ -71,6 +71,18 @@ spec:
                   name: tradingmaster-secrets
                   key: telegram-chat-id
                   optional: true
+            - name: TM_BINANCE_TESTNET_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tradingmaster-secrets
+                  key: binance-testnet-api-key
+                  optional: true
+            - name: TM_BINANCE_TESTNET_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tradingmaster-secrets
+                  key: binance-testnet-secret-key
+                  optional: true
           ports:
             - name: http
               containerPort: 8080

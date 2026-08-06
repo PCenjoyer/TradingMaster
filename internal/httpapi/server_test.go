@@ -14,6 +14,7 @@ import (
 
 	"github.com/PCenjoyer/TradingMaster/internal/alert"
 	"github.com/PCenjoyer/TradingMaster/internal/paper"
+	"github.com/PCenjoyer/TradingMaster/internal/testexchange"
 )
 
 func TestHealth(t *testing.T) {
@@ -106,6 +107,31 @@ func TestPaperEndpointDisabledWithoutDatabase(t *testing.T) {
 	}
 }
 
+func TestTestnetOrderEndpoint(t *testing.T) {
+	broker := &fakeTestnetBroker{}
+	server := newTestServer(t, Config{
+		AdminToken: "secret", DailyLossLimit: 0.03, TestExchange: broker,
+	})
+	response := postAuthorized(t, server.Handler(), "/api/v1/testnet/orders", `{
+		"idempotency_key":"strategy:20260806:0001",
+		"symbol":"BTCUSDT","side":"buy","order_type":"market","quantity":"0.001"
+	}`)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"status":"validated"`) {
+		t.Fatalf("тестовая заявка не принята: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestTestnetEndpointDisabledWithoutCredentials(t *testing.T) {
+	server := newTestServer(t, Config{AdminToken: "secret", DailyLossLimit: 0.03})
+	response := postAuthorized(t, server.Handler(), "/api/v1/testnet/orders", `{
+		"idempotency_key":"strategy:20260806:0001",
+		"symbol":"BTCUSDT","side":"buy","order_type":"market","quantity":"0.001"
+	}`)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ожидался код 503, получен %d: %s", response.Code, response.Body.String())
+	}
+}
+
 type recordingNotifier struct {
 	events []alert.Event
 }
@@ -115,6 +141,8 @@ type failingNotifier struct{}
 type fakePaperBroker struct {
 	portfolio paper.Portfolio
 }
+
+type fakeTestnetBroker struct{}
 
 func (*fakePaperBroker) Enabled() bool { return true }
 func (b *fakePaperBroker) Mark(context.Context, paper.MarkRequest) (paper.MarkResult, error) {
@@ -131,6 +159,32 @@ func (*fakePaperBroker) Submit(_ context.Context, request paper.SubmitRequest) (
 		ID: "test-order", CreatedAt: time.Now().UTC(), Symbol: request.Symbol, Side: request.Side,
 		OrderType: "market", Quantity: request.Quantity, MarketPrice: request.MarketPrice, Status: paper.StatusFilled,
 	}, nil
+}
+
+func (*fakeTestnetBroker) Enabled() bool           { return true }
+func (*fakeTestnetBroker) Mode() testexchange.Mode { return testexchange.ModeValidate }
+func (*fakeTestnetBroker) Status(context.Context) (testexchange.ServiceStatus, error) {
+	return testexchange.ServiceStatus{
+		Connected: true, Exchange: "Binance Spot", Environment: "testnet",
+		Mode: testexchange.ModeValidate, ServerTime: time.Now().UTC(),
+	}, nil
+}
+func (*fakeTestnetBroker) Account(context.Context) (testexchange.Account, error) {
+	return testexchange.Account{CanTrade: true, Balances: []testexchange.Balance{}}, nil
+}
+func (*fakeTestnetBroker) Submit(_ context.Context, request testexchange.SubmitRequest) (testexchange.Order, error) {
+	return testexchange.Order{
+		ID: 1, IdempotencyKey: request.IdempotencyKey, ClientOrderID: "tm-test",
+		Symbol: request.Symbol, Side: request.Side, OrderType: request.OrderType,
+		Quantity: request.Quantity, Mode: testexchange.ModeValidate,
+		Status: testexchange.StatusValidated, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}, nil
+}
+func (*fakeTestnetBroker) Orders(context.Context, int) ([]testexchange.Order, error) {
+	return []testexchange.Order{}, nil
+}
+func (*fakeTestnetBroker) Reconcile(context.Context, string) (testexchange.Order, error) {
+	return testexchange.Order{ID: 1, Status: testexchange.StatusValidated}, nil
 }
 
 func (failingNotifier) Enabled() bool { return true }

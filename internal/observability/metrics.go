@@ -23,6 +23,26 @@ type Metrics struct {
 	paperFilled       atomic.Uint64
 	paperRejected     atomic.Uint64
 	paperErrors       atomic.Uint64
+	testnetValidated  atomic.Uint64
+	testnetSubmitted  atomic.Uint64
+	testnetUnknown    atomic.Uint64
+	testnetRejected   atomic.Uint64
+	testnetErrors     atomic.Uint64
+}
+
+func (m *Metrics) ObserveTestnetOrder(status string) {
+	switch status {
+	case "validated":
+		m.testnetValidated.Add(1)
+	case "submitted":
+		m.testnetSubmitted.Add(1)
+	case "unknown":
+		m.testnetUnknown.Add(1)
+	case "rejected":
+		m.testnetRejected.Add(1)
+	default:
+		m.testnetErrors.Add(1)
+	}
 }
 
 func (m *Metrics) SetSafetyUnavailable() {
@@ -120,11 +140,20 @@ func (m *Metrics) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 			"# TYPE tradingmaster_paper_orders_total counter\n"+
 			"tradingmaster_paper_orders_total{status=\"filled\"} %d\n"+
 			"tradingmaster_paper_orders_total{status=\"rejected\"} %d\n"+
-			"tradingmaster_paper_orders_total{status=\"error\"} %d\n",
+			"tradingmaster_paper_orders_total{status=\"error\"} %d\n"+
+			"# HELP tradingmaster_testnet_orders_total Результаты обработки заявок Binance Spot Testnet.\n"+
+			"# TYPE tradingmaster_testnet_orders_total counter\n"+
+			"tradingmaster_testnet_orders_total{status=\"validated\"} %d\n"+
+			"tradingmaster_testnet_orders_total{status=\"submitted\"} %d\n"+
+			"tradingmaster_testnet_orders_total{status=\"unknown\"} %d\n"+
+			"tradingmaster_testnet_orders_total{status=\"rejected\"} %d\n"+
+			"tradingmaster_testnet_orders_total{status=\"error\"} %d\n",
 		m.backtests.Load(), m.errors.Load(), m.duration.Load(), m.killSwitch.Load(),
 		math.Float64frombits(m.dailyLoss.Load()), math.Float64frombits(m.dailyLimit.Load()),
 		m.safetyTransitions.Load(), m.alertsSent.Load(), m.alertsFailed.Load(),
 		m.durableStore.Load(), math.Float64frombits(m.paperEquity.Load()),
 		m.paperFilled.Load(), m.paperRejected.Load(), m.paperErrors.Load(),
+		m.testnetValidated.Load(), m.testnetSubmitted.Load(), m.testnetUnknown.Load(),
+		m.testnetRejected.Load(), m.testnetErrors.Load(),
 	)
 }

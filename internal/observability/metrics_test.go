@@ -16,6 +16,8 @@ func TestSafetyAndTelegramMetrics(t *testing.T) {
 	metrics.SetPaperEquity(12_345.67)
 	metrics.ObservePaperOrder("filled")
 	metrics.ObservePaperOrder("rejected")
+	metrics.ObserveTestnetOrder("validated")
+	metrics.ObserveTestnetOrder("unknown")
 
 	response := httptest.NewRecorder()
 	metrics.ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
@@ -30,6 +32,8 @@ func TestSafetyAndTelegramMetrics(t *testing.T) {
 		"tradingmaster_paper_equity 12345.67000000",
 		"tradingmaster_paper_orders_total{status=\"filled\"} 1",
 		"tradingmaster_paper_orders_total{status=\"rejected\"} 1",
+		"tradingmaster_testnet_orders_total{status=\"validated\"} 1",
+		"tradingmaster_testnet_orders_total{status=\"unknown\"} 1",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("в метриках нет %q:\n%s", expected, body)

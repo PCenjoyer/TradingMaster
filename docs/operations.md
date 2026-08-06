@@ -169,7 +169,62 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 
 Каждое исполнение атомарно меняет cash и позицию, а затем добавляется в append-only журнал. Рыночная цена передаётся вызывающей стороной: это детерминированный paper-адаптер, а не подключение к биржевому стакану.
 
-## 8. Подключить Prometheus и Grafana
+## 8. Подключить Binance Spot Testnet
+
+Создайте отдельные ключи на [Binance Spot Test Network](https://testnet.binance.vision/). Не используйте ключи от реального аккаунта: приложение принимает только официальный testnet endpoint, а production URL программно запрещён.
+
+Добавьте тестовые ключи в существующий Kubernetes Secret, не заменяя уже настроенные database/Telegram-значения, и включите безопасный режим `validate`:
+
+~~~bash
+BINANCE_TESTNET_API_KEY_B64="$(printf %s "$BINANCE_TESTNET_API_KEY" | base64 | tr -d '\n')"
+BINANCE_TESTNET_SECRET_KEY_B64="$(printf %s "$BINANCE_TESTNET_SECRET_KEY" | base64 | tr -d '\n')"
+kubectl -n tradingmaster patch secret tradingmaster-secrets --type merge \
+  -p "{\"data\":{\"binance-testnet-api-key\":\"$BINANCE_TESTNET_API_KEY_B64\",\"binance-testnet-secret-key\":\"$BINANCE_TESTNET_SECRET_KEY_B64\"}}"
+unset BINANCE_TESTNET_API_KEY_B64 BINANCE_TESTNET_SECRET_KEY_B64
+
+kubectl -n tradingmaster patch configmap tradingmaster --type merge \
+  -p '{"data":{"TM_BINANCE_TESTNET_ENABLED":"true","TM_BINANCE_TESTNET_ORDER_MODE":"validate"}}'
+kubectl -n tradingmaster rollout restart deployment/tradingmaster
+kubectl -n tradingmaster rollout status deployment/tradingmaster
+~~~
+
+`validate` вызывает `/api/v3/order/test`: биржа проверяет подпись, фильтры символа и параметры, но не передаёт заявку matching engine. После проверки переключите только тестовый контур в `execute`, чтобы заявки исполнялись тестовыми активами:
+
+~~~bash
+kubectl -n tradingmaster patch configmap tradingmaster --type merge \
+  -p '{"data":{"TM_BINANCE_TESTNET_ORDER_MODE":"execute"}}'
+kubectl -n tradingmaster rollout restart deployment/tradingmaster
+~~~
+
+Проверка подключения и тестового счёта:
+
+~~~bash
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost:8080/api/v1/testnet/status
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost:8080/api/v1/testnet/account
+~~~
+
+Величины передаются строками, чтобы не терять точность десятичных значений. Один `idempotency_key` можно безопасно повторить с теми же параметрами; попытка использовать его для другой заявки вернёт конфликт:
+
+~~~bash
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"idempotency_key":"trend:20260806:0001","symbol":"BTCUSDT","side":"buy","order_type":"market","quantity":"0.001"}' \
+  http://localhost:8080/api/v1/testnet/orders
+
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:8080/api/v1/testnet/orders?limit=50'
+
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost:8080/api/v1/testnet/orders/trend:20260806:0001/reconcile
+~~~
+
+Статус `unknown` означает, что matching engine мог принять заявку, но подтверждение не получено. Не создавайте новую заявку с другим ключом: сначала вызовите reconciliation. Новые покупки проходят через общий kill switch; продажи остаются разрешены для сокращения spot-позиции.
+
+## 9. Подключить Prometheus и Grafana
 
 Каталог monitoring требует CRD от Prometheus Operator, например установленного kube-prometheus-stack:
 
@@ -179,11 +234,11 @@ kubectl apply -k monitoring
 
 ServiceMonitor и PrometheusRule по умолчанию имеют label release=kube-prometheus-stack. Если Helm release называется иначе, замените label перед применением. Grafana sidecar обнаруживает ConfigMap по label grafana_dashboard=1 и загружает dashboard «TradingMaster — безопасность и paper-trading».
 
-Dashboard показывает kill switch, тип safety-store, дневной убыток, paper equity и результаты заявок. Prometheus создаёт critical alert при активной блокировке или локальном safety-store и warning при использовании 80% дневного лимита.
+Dashboard показывает kill switch, тип safety-store, дневной убыток, paper equity, paper-заявки и результаты Binance Spot Testnet. Prometheus создаёт critical alert при активной блокировке, локальном safety-store или неизвестном состоянии testnet-заявки и warning при использовании 80% дневного лимита.
 
 ## Ограничение текущей версии
 
-Paper broker не отправляет заявки на биржу и принимает цену исполнения от вызывающей стороны. Пока нет idempotency key, биржевого market-data adapter, reconciliation и outbox, включать live trading нельзя. `/api/v1/status` поэтому продолжает возвращать `live_trading: false`.
+Paper broker не отправляет заявки на биржу и принимает цену исполнения от вызывающей стороны. Testnet-адаптер уже имеет idempotency key, durable-журнал и reconciliation заявок, но пока нет биржевого market-data stream, сверки всего баланса/позиций и outbox. Включать торговлю реальными средствами нельзя; `/api/v1/status` продолжает возвращать `live_trading: false`.
 
 ## Откат
 

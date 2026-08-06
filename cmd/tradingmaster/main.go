@@ -23,6 +23,7 @@ import (
 	"github.com/PCenjoyer/TradingMaster/internal/risk"
 	"github.com/PCenjoyer/TradingMaster/internal/safety"
 	"github.com/PCenjoyer/TradingMaster/internal/strategy"
+	"github.com/PCenjoyer/TradingMaster/internal/testexchange"
 )
 
 var version = "dev"
@@ -82,8 +83,16 @@ func serve(address string) error {
 		return err
 	}
 	var paperBroker paper.Broker
+	var testnetBroker testexchange.Broker
+	testnetEnabled, err := envBool("TM_BINANCE_TESTNET_ENABLED", false)
+	if err != nil {
+		return err
+	}
 	databaseURL := os.Getenv("TM_DATABASE_URL")
 	if databaseURL == "" {
+		if testnetEnabled {
+			return fmt.Errorf("Binance Spot Testnet требует TM_DATABASE_URL для durable-журнала")
+		}
 		logger.Warn("PostgreSQL не настроен: safety-state хранится в памяти, paper trading отключён")
 	} else {
 		startupContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -108,12 +117,23 @@ func serve(address string) error {
 		if err != nil {
 			return err
 		}
+		if testnetEnabled {
+			testnetConfig, configErr := testnetConfigFromEnv()
+			if configErr != nil {
+				return configErr
+			}
+			testnetBroker, err = testexchange.NewBinanceSpotBroker(startupContext, pool, controller, testnetConfig)
+			if err != nil {
+				return err
+			}
+			logger.Info("подключён Binance Spot Testnet", "режим_заявок", testnetBroker.Mode())
+		}
 		logger.Info("подключено общее PostgreSQL-хранилище", "paper_trading", true)
 	}
 	api, err := httpapi.NewServer(logger, version, httpapi.Config{
 		AdminToken: adminToken, DailyLossLimit: dailyLossLimit,
 		InitialKillSwitch: initialKillSwitch, Notifier: notifier,
-		Safety: controller, Paper: paperBroker,
+		Safety: controller, Paper: paperBroker, TestExchange: testnetBroker,
 	})
 	if err != nil {
 		return fmt.Errorf("настроить API: %w", err)
@@ -244,4 +264,20 @@ func paperConfigFromEnv() (paper.Config, error) {
 		return paper.Config{}, err
 	}
 	return paper.Config{InitialCapital: initialCapital, FeeBPS: feeBPS, SlippageBPS: slippageBPS}, nil
+}
+
+func testnetConfigFromEnv() (testexchange.Config, error) {
+	receiveWindowMilliseconds, err := envFloat("TM_BINANCE_TESTNET_RECV_WINDOW_MS", 5_000)
+	if err != nil {
+		return testexchange.Config{}, err
+	}
+	if receiveWindowMilliseconds != float64(int64(receiveWindowMilliseconds)) {
+		return testexchange.Config{}, fmt.Errorf("TM_BINANCE_TESTNET_RECV_WINDOW_MS должно быть целым числом")
+	}
+	return testexchange.Config{
+		APIKey:        os.Getenv("TM_BINANCE_TESTNET_API_KEY"),
+		SecretKey:     os.Getenv("TM_BINANCE_TESTNET_SECRET_KEY"),
+		Mode:          testexchange.Mode(envOrDefault("TM_BINANCE_TESTNET_ORDER_MODE", string(testexchange.ModeValidate))),
+		ReceiveWindow: time.Duration(int64(receiveWindowMilliseconds)) * time.Millisecond,
+	}, nil
 }

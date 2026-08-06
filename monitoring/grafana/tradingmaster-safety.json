@@ -342,6 +342,49 @@
       ],
       "title": "Paper-заявки за 15 минут",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (status) (increase(tradingmaster_testnet_orders_total[15m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Заявки Binance Spot Testnet за 15 минут",
+      "type": "timeseries"
     }
   ],
   "refresh": "15s",
@@ -349,7 +392,8 @@
   "tags": [
     "tradingmaster",
     "безопасность",
-    "paper-trading"
+    "paper-trading",
+    "testnet"
   ],
   "templating": {
     "list": []
@@ -360,8 +404,8 @@
   },
   "timepicker": {},
   "timezone": "utc",
-  "title": "TradingMaster — безопасность и paper-trading",
+  "title": "TradingMaster — безопасность, paper-trading и testnet",
   "uid": "tradingmaster-safety",
-  "version": 2,
+  "version": 3,
   "weekStart": "monday"
 }

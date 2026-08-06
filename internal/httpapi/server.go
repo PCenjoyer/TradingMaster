@@ -22,6 +22,7 @@ import (
 	"github.com/PCenjoyer/TradingMaster/internal/risk"
 	"github.com/PCenjoyer/TradingMaster/internal/safety"
 	"github.com/PCenjoyer/TradingMaster/internal/strategy"
+	"github.com/PCenjoyer/TradingMaster/internal/testexchange"
 )
 
 const maxRequestSize = 16 << 20
@@ -40,6 +41,7 @@ type Config struct {
 	Notifier          alert.Notifier
 	Safety            *safety.Controller
 	Paper             paper.Broker
+	TestExchange      testexchange.Broker
 }
 
 func DefaultConfig() Config {
@@ -47,13 +49,14 @@ func DefaultConfig() Config {
 }
 
 type Server struct {
-	logger     *slog.Logger
-	metrics    *observability.Metrics
-	safety     *safety.Controller
-	notifier   alert.Notifier
-	paper      paper.Broker
-	adminToken string
-	version    string
+	logger       *slog.Logger
+	metrics      *observability.Metrics
+	safety       *safety.Controller
+	notifier     alert.Notifier
+	paper        paper.Broker
+	testExchange testexchange.Broker
+	adminToken   string
+	version      string
 }
 
 func NewServer(logger *slog.Logger, version string, configs ...Config) (*Server, error) {
@@ -95,7 +98,8 @@ func NewServer(logger *slog.Logger, version string, configs ...Config) (*Server,
 	}
 	server := &Server{
 		logger: logger, metrics: metrics, safety: controller, notifier: config.Notifier,
-		paper: config.Paper, adminToken: config.AdminToken, version: version,
+		paper: config.Paper, testExchange: config.TestExchange,
+		adminToken: config.AdminToken, version: version,
 	}
 	if state.Active && !controller.Durable() {
 		server.notifyTransition(safety.Transition{
@@ -119,6 +123,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/paper/orders", s.requireAdmin(s.paperOrders))
 	mux.HandleFunc("GET /api/v1/paper/portfolio", s.requireAdmin(s.paperPortfolio))
 	mux.HandleFunc("POST /api/v1/paper/marks", s.requireAdmin(s.paperMark))
+	mux.HandleFunc("GET /api/v1/testnet/status", s.requireAdmin(s.testnetStatus))
+	mux.HandleFunc("GET /api/v1/testnet/account", s.requireAdmin(s.testnetAccount))
+	mux.HandleFunc("POST /api/v1/testnet/orders", s.requireAdmin(s.testnetOrder))
+	mux.HandleFunc("GET /api/v1/testnet/orders", s.requireAdmin(s.testnetOrders))
+	mux.HandleFunc("POST /api/v1/testnet/orders/{idempotency_key}/reconcile", s.requireAdmin(s.testnetReconcile))
 	mux.HandleFunc("GET /metrics", s.metricsEndpoint)
 	return s.recoverPanic(s.logRequests(mux))
 }
@@ -148,9 +157,13 @@ func (s *Server) status(writer http.ResponseWriter, request *http.Request) {
 		s.observeSafetyState(safetyState)
 	}
 	paperEnabled := s.paper != nil && s.paper.Enabled()
+	testnetEnabled := s.testExchange != nil && s.testExchange.Enabled()
 	mode := "исследование и бэктест"
 	if paperEnabled {
 		mode = "исследование, бэктест и paper-trading"
+	}
+	if testnetEnabled {
+		mode += " и Binance Spot Testnet"
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"service": "TradingMaster", "version": s.version,
@@ -161,7 +174,130 @@ func (s *Server) status(writer http.ResponseWriter, request *http.Request) {
 		"safety_admin_enabled":   s.adminToken != "",
 		"telegram_enabled":       s.notifier.Enabled(),
 		"paper_trading":          paperEnabled,
+		"test_exchange_enabled":  testnetEnabled,
+		"test_exchange":          "Binance Spot Testnet",
+		"test_exchange_order_mode": func() string {
+			if !testnetEnabled {
+				return "disabled"
+			}
+			return string(s.testExchange.Mode())
+		}(),
 	})
+}
+
+func (s *Server) testnetStatus(writer http.ResponseWriter, request *http.Request) {
+	if !s.testnetEnabled(writer) {
+		return
+	}
+	status, err := s.testExchange.Status(request.Context())
+	if err != nil {
+		s.logger.Error("Binance Spot Testnet недоступен", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "тестовая биржа недоступна"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) testnetAccount(writer http.ResponseWriter, request *http.Request) {
+	if !s.testnetEnabled(writer) {
+		return
+	}
+	account, err := s.testExchange.Account(request.Context())
+	if err != nil {
+		s.logger.Error("счёт Binance Spot Testnet не прочитан", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "счёт тестовой биржи недоступен"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, account)
+}
+
+func (s *Server) testnetOrder(writer http.ResponseWriter, request *http.Request) {
+	if !s.testnetEnabled(writer) {
+		return
+	}
+	var payload testexchange.SubmitRequest
+	if err := decodeStrictJSON(writer, request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "некорректная заявка тестовой биржи", err)
+		return
+	}
+	order, err := s.testExchange.Submit(request.Context(), payload)
+	if errors.Is(err, testexchange.ErrInvalidRequest) {
+		writeError(writer, http.StatusUnprocessableEntity, "заявка тестовой биржи отклонена", err)
+		return
+	}
+	if errors.Is(err, testexchange.ErrIdempotencyConflict) {
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		s.logger.Error("заявка тестовой биржи не обработана", "ошибка", err)
+		s.metrics.ObserveTestnetOrder("error")
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "адаптер тестовой биржи недоступен"})
+		return
+	}
+	s.metrics.ObserveTestnetOrder(order.Status)
+	status := http.StatusCreated
+	if order.Replayed {
+		status = http.StatusOK
+	} else if order.Status == testexchange.StatusUnknown {
+		status = http.StatusAccepted
+	} else if order.Status == testexchange.StatusRejected {
+		status = http.StatusConflict
+	}
+	writeJSON(writer, status, map[string]any{"order": order})
+}
+
+func (s *Server) testnetOrders(writer http.ResponseWriter, request *http.Request) {
+	if !s.testnetEnabled(writer) {
+		return
+	}
+	limit := 50
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 200 {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "limit должен быть от 1 до 200"})
+			return
+		}
+		limit = parsed
+	}
+	orders, err := s.testExchange.Orders(request.Context(), limit)
+	if err != nil {
+		s.logger.Error("журнал тестовой биржи не прочитан", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "журнал тестовой биржи недоступен"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"orders": orders})
+}
+
+func (s *Server) testnetReconcile(writer http.ResponseWriter, request *http.Request) {
+	if !s.testnetEnabled(writer) {
+		return
+	}
+	order, err := s.testExchange.Reconcile(request.Context(), request.PathValue("idempotency_key"))
+	if errors.Is(err, testexchange.ErrInvalidRequest) {
+		writeError(writer, http.StatusUnprocessableEntity, "ключ идемпотентности отклонён", err)
+		return
+	}
+	if errors.Is(err, testexchange.ErrOrderNotFound) {
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		s.logger.Error("сверка заявки тестовой биржи не выполнена", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "сверка с тестовой биржей недоступна"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"order": order})
+}
+
+func (s *Server) testnetEnabled(writer http.ResponseWriter) bool {
+	if s.testExchange == nil || !s.testExchange.Enabled() {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+			"error": "тестовая биржа отключена: настройте durable PostgreSQL и тестовые API-ключи",
+		})
+		return false
+	}
+	return true
 }
 
 func (s *Server) metricsEndpoint(writer http.ResponseWriter, request *http.Request) {

@@ -24,6 +24,20 @@ func TestPostgresSafetyAndPaperJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, "select pg_advisory_lock($1)", int64(793046118305114)); err != nil {
+		connection.Release()
+		t.Fatal(err)
+	}
+	defer func() {
+		unlockContext, unlockCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer unlockCancel()
+		_, _ = connection.Exec(unlockContext, "select pg_advisory_unlock($1)", int64(793046118305114))
+		connection.Release()
+	}()
 	if err := database.Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}

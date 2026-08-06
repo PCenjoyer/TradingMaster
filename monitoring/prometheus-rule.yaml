@@ -50,3 +50,19 @@ spec:
           annotations:
             summary: "TradingMaster: ошибки paper broker"
             description: "За последние 5 минут paper broker не смог обработать хотя бы одну заявку."
+        - alert: TradingMasterTestnetOrderUnknown
+          expr: sum(increase(tradingmaster_testnet_orders_total{status="unknown"}[5m])) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "TradingMaster: состояние testnet-заявки неизвестно"
+            description: "Ответ matching engine оказался неоднозначным. Запустите reconciliation по ключу идемпотентности."
+        - alert: TradingMasterTestnetOrderErrors
+          expr: sum(increase(tradingmaster_testnet_orders_total{status="error"}[5m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: ошибка адаптера тестовой биржи"
+            description: "За последние 5 минут адаптер Binance Spot Testnet не смог обработать хотя бы одну заявку."

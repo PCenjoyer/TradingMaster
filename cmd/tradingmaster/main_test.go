@@ -61,3 +61,25 @@ func TestPaperConfigFromEnvironment(t *testing.T) {
 		t.Fatalf("неожиданная paper-конфигурация: %#v", config)
 	}
 }
+
+func TestTestnetConfigFromEnvironment(t *testing.T) {
+	t.Setenv("TM_BINANCE_TESTNET_API_KEY", "test-api")
+	t.Setenv("TM_BINANCE_TESTNET_SECRET_KEY", "test-secret")
+	t.Setenv("TM_BINANCE_TESTNET_ORDER_MODE", "execute")
+	t.Setenv("TM_BINANCE_TESTNET_RECV_WINDOW_MS", "4000")
+	config, err := testnetConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.APIKey != "test-api" || config.SecretKey != "test-secret" ||
+		config.Mode != "execute" || config.ReceiveWindow.Milliseconds() != 4000 {
+		t.Fatalf("неожиданная testnet-конфигурация: %#v", config)
+	}
+}
+
+func TestTestnetReceiveWindowMustBeInteger(t *testing.T) {
+	t.Setenv("TM_BINANCE_TESTNET_RECV_WINDOW_MS", "1.5")
+	if _, err := testnetConfigFromEnv(); err == nil {
+		t.Fatal("дробный receive window должен быть отклонён")
+	}
+}

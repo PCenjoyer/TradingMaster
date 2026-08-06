@@ -1,6 +1,6 @@
 # TradingMaster
 
-TradingMaster — собственный движок алгоритмической торговли на Go. Текущая версия предназначена для исследования стратегий, воспроизводимых бэктестов и paper-trading. Отправка реальных заявок на биржу намеренно отключена до появления live-адаптера и reconciliation с биржей.
+TradingMaster — собственный движок алгоритмической торговли на Go. Текущая версия предназначена для исследования стратегий, воспроизводимых бэктестов, paper-trading и Binance Spot Testnet. Отправка заявок с реальными средствами намеренно запрещена.
 
 > Важно: проект не обещает доходность и не является инвестиционной рекомендацией. Результаты на истории не гарантируют будущий результат. Сначала используйте только исторические данные и тестовый счёт.
 
@@ -13,6 +13,7 @@ TradingMaster — собственный движок алгоритмическ
 - защищённый admin API, fail-safe запуск и Telegram-уведомления о переключениях защиты;
 - общий durable safety-store в PostgreSQL с атомарной координацией нескольких экземпляров;
 - paper broker с рыночными заявками, портфелем и append-only журналом заявок и исполнений;
+- Binance Spot Testnet с HMAC-подписью, идемпотентными client order ID, reconciliation и durable-журналом;
 - комиссии, проскальзывание и гэпы через стоп;
 - метрики: доходность, максимальная просадка, Sharpe, profit factor, win rate и экспозиция;
 - загрузка OHLCV из CSV и HTTP API для запуска бэктестов;
@@ -46,6 +47,11 @@ go run ./cmd/tradingmaster -mode api
 - GET http://localhost:8080/api/v1/paper/orders — журнал заявок и исполнений;
 - GET http://localhost:8080/api/v1/paper/portfolio — текущий тестовый портфель;
 - POST http://localhost:8080/api/v1/paper/marks — обновление рыночной цены и safety equity;
+- GET http://localhost:8080/api/v1/testnet/status — связь и время Binance Spot Testnet;
+- GET http://localhost:8080/api/v1/testnet/account — тестовый счёт и ненулевые балансы;
+- POST http://localhost:8080/api/v1/testnet/orders — валидация или отправка тестовой заявки;
+- GET http://localhost:8080/api/v1/testnet/orders — durable-журнал тестовых заявок;
+- POST http://localhost:8080/api/v1/testnet/orders/{idempotency_key}/reconcile — сверка неоднозначной заявки;
 - GET http://localhost:8080/metrics — метрики.
 
 Запуск в контейнере:
@@ -97,6 +103,8 @@ flowchart LR
     M --> A
     P["Paper broker"] --> J["PostgreSQL: safety и журнал"]
     A --> P
+    A --> T["Binance Spot Testnet"]
+    T --> J
 ~~~
 
 Границы компонентов и путь к live-trading описаны в [docs/architecture.md](docs/architecture.md).
@@ -113,7 +121,7 @@ Terraform создаёт:
 - закрытый RDS PostgreSQL с шифрованием, резервными копиями и паролем под управлением Secrets Manager;
 - отдельный S3 bucket для versioned и locked Terraform state.
 
-Kubernetes запускает от двух до шести экземпляров приложения с общим PostgreSQL safety-state, restricted Pod Security, non-root UID, read-only root filesystem, удалёнными Linux capabilities, resource limits, probes, PDB, HPA и NetworkPolicy. Без обязательного секрета `database-url` pod не запускается.
+Kubernetes запускает от двух до шести экземпляров приложения с общим PostgreSQL safety-state, restricted Pod Security, non-root UID, read-only root filesystem, удалёнными Linux capabilities, resource limits, probes, PDB, HPA по CPU и памяти и NetworkPolicy. Без обязательного секрета `database-url` pod не запускается.
 
 Опциональный каталог [monitoring](monitoring) содержит ServiceMonitor, PrometheusRule и русский Grafana dashboard «TradingMaster — безопасность и paper-trading».
 
@@ -130,12 +138,13 @@ kubectl kustomize deploy/k8s
 kubectl kustomize monitoring
 ~~~
 
-CI запускает аналогичные проверки на каждом PR и поднимает отдельный PostgreSQL для интеграционного теста миграций, блокировок, paper broker и append-only журнала. Тег v* публикует multi-arch образ в ghcr.io/pcenjoyer/tradingmaster. Развёртывание запускается вручную workflow «Развёртывание в EKS», чтобы случайный push не менял production.
+CI запускает аналогичные проверки на каждом PR и поднимает PostgreSQL для интеграционных тестов миграций, блокировок, paper broker, testnet-идемпотентности и append-only журналов. Тег v* публикует multi-arch образ в ghcr.io/pcenjoyer/tradingmaster. Развёртывание запускается вручную workflow «Развёртывание в EKS», чтобы случайный push не менял production.
 
 ## Безопасность и источники
 
 - Секреты не хранятся в Git: AWS-доступ для CD выдаётся краткоживущим OIDC-токеном.
-- Database URL, admin token и Telegram credentials загружаются только из окружения или Kubernetes Secret.
+- Database URL, admin token, Telegram credentials и тестовые биржевые ключи загружаются только из окружения или Kubernetes Secret.
+- Testnet-адаптер принимает только `https://testnet.binance.vision`; production endpoint нельзя включить переменной окружения.
 - Kubernetes-профиль следует официальному [Restricted Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/).
 - Terraform state использует [S3 locking через lockfile](https://developer.hashicorp.com/terraform/language/backend/s3), а бакет имеет versioning и запрет публичного доступа.
 - Подключение к закрытому EKS описано в [документации AWS](https://docs.aws.amazon.com/eks/latest/userguide/create-kubeconfig.html).
