@@ -194,6 +194,11 @@ func (b *PostgresBroker) execute(ctx context.Context, order Order) (Order, error
 }
 
 func (b *PostgresBroker) executeInTransaction(ctx context.Context, transaction pgx.Tx, order Order) (Order, error) {
+	operationTime, err := databaseTime(ctx, transaction)
+	if err != nil {
+		return Order{}, err
+	}
+	order.CreatedAt = operationTime
 	if err := createOrder(ctx, transaction, order); err != nil {
 		return Order{}, err
 	}
@@ -214,9 +219,9 @@ func (b *PostgresBroker) executeInTransaction(ctx context.Context, transaction p
 	if order.Side == SideBuy {
 		cost := fillPrice*order.Quantity + commission
 		if cost > cash {
-			return rejectInTransaction(ctx, transaction, order, "недостаточно денежных средств")
+			return rejectInTransaction(ctx, transaction, order, "недостаточно денежных средств", operationTime)
 		}
-		if err := b.applyBuy(ctx, transaction, order, fillPrice, cost, cash); err != nil {
+		if err := b.applyBuy(ctx, transaction, order, fillPrice, cost, cash, operationTime); err != nil {
 			return Order{}, err
 		}
 	} else {
@@ -225,9 +230,9 @@ func (b *PostgresBroker) executeInTransaction(ctx context.Context, transaction p
 			return Order{}, err
 		}
 		if order.Quantity > positionQuantity {
-			return rejectInTransaction(ctx, transaction, order, "недостаточно актива для продажи")
+			return rejectInTransaction(ctx, transaction, order, "недостаточно актива для продажи", operationTime)
 		}
-		if err := b.applySell(ctx, transaction, order, fillPrice, commission, cash, positionQuantity); err != nil {
+		if err := b.applySell(ctx, transaction, order, fillPrice, commission, cash, positionQuantity, operationTime); err != nil {
 			return Order{}, err
 		}
 	}
@@ -238,7 +243,7 @@ func (b *PostgresBroker) executeInTransaction(ctx context.Context, transaction p
 	}
 	execution := &Execution{
 		ID: executionID, OrderID: order.ID, Quantity: order.Quantity, Price: fillPrice,
-		Commission: commission, ExecutedAt: b.clock(),
+		Commission: commission, ExecutedAt: operationTime,
 	}
 	if _, err := transaction.Exec(ctx, `
 		insert into tradingmaster_paper_executions(id, order_id, quantity, price, commission, executed_at)
@@ -282,7 +287,13 @@ func (b *PostgresBroker) executeInTransaction(ctx context.Context, transaction p
 	return order, nil
 }
 
-func (b *PostgresBroker) applyBuy(ctx context.Context, transaction pgx.Tx, order Order, fillPrice, cost, cash float64) error {
+func (b *PostgresBroker) applyBuy(
+	ctx context.Context,
+	transaction pgx.Tx,
+	order Order,
+	fillPrice, cost, cash float64,
+	operationTime time.Time,
+) error {
 	var currentQuantity, averagePrice float64
 	err := transaction.QueryRow(ctx, `
 		select quantity, average_price from tradingmaster_paper_positions
@@ -301,13 +312,13 @@ func (b *PostgresBroker) applyBuy(ctx context.Context, transaction pgx.Tx, order
 		values ($1, $2, $3, $4)
 		on conflict (symbol) do update set quantity = excluded.quantity,
 			average_price = excluded.average_price, updated_at = excluded.updated_at`,
-		order.Symbol, newQuantity, newAverage, b.clock(),
+		order.Symbol, newQuantity, newAverage, operationTime,
 	); err != nil {
 		return err
 	}
 	_, err = transaction.Exec(ctx,
 		"update tradingmaster_paper_accounts set cash = $1, updated_at = $2 where id = 1",
-		cash-cost, b.clock(),
+		cash-cost, operationTime,
 	)
 	return err
 }
@@ -317,6 +328,7 @@ func (b *PostgresBroker) applySell(
 	transaction pgx.Tx,
 	order Order,
 	fillPrice, commission, cash, positionQuantity float64,
+	operationTime time.Time,
 ) error {
 	remaining := positionQuantity - order.Quantity
 	if math.Abs(remaining) < 1e-12 {
@@ -328,14 +340,14 @@ func (b *PostgresBroker) applySell(
 	} else {
 		if _, err := transaction.Exec(ctx, `
 			update tradingmaster_paper_positions set quantity = $1, updated_at = $2 where symbol = $3`,
-			remaining, b.clock(), order.Symbol,
+			remaining, operationTime, order.Symbol,
 		); err != nil {
 			return err
 		}
 	}
 	_, err := transaction.Exec(ctx,
 		"update tradingmaster_paper_accounts set cash = $1, updated_at = $2 where id = 1",
-		cash+fillPrice*order.Quantity-commission, b.clock(),
+		cash+fillPrice*order.Quantity-commission, operationTime,
 	)
 	return err
 }
@@ -346,10 +358,15 @@ func (b *PostgresBroker) persistRejected(ctx context.Context, order Order, reaso
 		return Order{}, err
 	}
 	defer func() { _ = transaction.Rollback(context.Background()) }()
+	operationTime, err := databaseTime(ctx, transaction)
+	if err != nil {
+		return Order{}, err
+	}
+	order.CreatedAt = operationTime
 	if err := createOrder(ctx, transaction, order); err != nil {
 		return Order{}, err
 	}
-	result, err := rejectInTransaction(ctx, transaction, order, reason)
+	result, err := rejectInTransaction(ctx, transaction, order, reason, operationTime)
 	if err != nil {
 		return Order{}, err
 	}
@@ -375,7 +392,13 @@ func createOrder(ctx context.Context, transaction pgx.Tx, order Order) error {
 	return err
 }
 
-func rejectInTransaction(ctx context.Context, transaction pgx.Tx, order Order, reason string) (Order, error) {
+func rejectInTransaction(
+	ctx context.Context,
+	transaction pgx.Tx,
+	order Order,
+	reason string,
+	operationTime time.Time,
+) (Order, error) {
 	if _, err := transaction.Exec(ctx, `
 		update tradingmaster_paper_orders set status = 'rejected', reject_reason = $1 where id = $2`,
 		reason, order.ID,
@@ -384,7 +407,7 @@ func rejectInTransaction(ctx context.Context, transaction pgx.Tx, order Order, r
 	}
 	if _, err := transaction.Exec(ctx, `
 		insert into tradingmaster_paper_order_events(order_id, event_type, reason, occurred_at)
-		values ($1, 'rejected', $2, $3)`, order.ID, reason, time.Now().UTC(),
+		values ($1, 'rejected', $2, $3)`, order.ID, reason, operationTime,
 	); err != nil {
 		return Order{}, err
 	}
@@ -424,6 +447,10 @@ func (b *PostgresBroker) Mark(ctx context.Context, request MarkRequest) (MarkRes
 		if !ok {
 			return fmt.Errorf("paper-переоценка выполняется вне safety-транзакции")
 		}
+		safetyTime, err := databaseTime(operationContext, transaction)
+		if err != nil {
+			return err
+		}
 		command, err := transaction.Exec(operationContext, `
 		insert into tradingmaster_paper_market_prices(symbol, price, observed_at)
 		values ($1, $2, $3)
@@ -439,7 +466,7 @@ func (b *PostgresBroker) Mark(ctx context.Context, request MarkRequest) (MarkRes
 		}
 		if _, err := transaction.Exec(operationContext, `
 		update tradingmaster_paper_accounts
-		set updated_at = greatest(updated_at, $1) where id = 1`, request.ObservedAt.UTC(),
+		set updated_at = greatest(updated_at, $1) where id = 1`, safetyTime,
 		); err != nil {
 			return err
 		}
@@ -447,7 +474,7 @@ func (b *PostgresBroker) Mark(ctx context.Context, request MarkRequest) (MarkRes
 		if err != nil {
 			return err
 		}
-		state, transition, err := b.safety.ObserveEquity(operationContext, request.ObservedAt, portfolio.Equity)
+		state, transition, err := b.safety.ObserveEquity(operationContext, safetyTime, portfolio.Equity)
 		if err != nil {
 			return err
 		}
@@ -617,4 +644,12 @@ func newID() (string, error) {
 	value[6] = (value[6] & 0x0f) | 0x40
 	value[8] = (value[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:16]), nil
+}
+
+func databaseTime(ctx context.Context, transaction pgx.Tx) (time.Time, error) {
+	var value time.Time
+	if err := transaction.QueryRow(ctx, "select clock_timestamp()").Scan(&value); err != nil {
+		return time.Time{}, err
+	}
+	return value.UTC(), nil
 }
