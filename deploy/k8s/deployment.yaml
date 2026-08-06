@@ -7,6 +7,8 @@ metadata:
     app.kubernetes.io/name: tradingmaster
 spec:
   replicas: 2
+  minReadySeconds: 10
+  progressDeadlineSeconds: 300
   revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
@@ -23,6 +25,7 @@ spec:
     spec:
       serviceAccountName: tradingmaster
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
