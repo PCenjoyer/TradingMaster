@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/PCenjoyer/TradingMaster/internal/alert"
+	"github.com/PCenjoyer/TradingMaster/internal/domain"
 	"github.com/PCenjoyer/TradingMaster/internal/paper"
+	"github.com/PCenjoyer/TradingMaster/internal/shadow"
 	"github.com/PCenjoyer/TradingMaster/internal/testexchange"
 )
 
@@ -132,6 +134,33 @@ func TestTestnetEndpointDisabledWithoutCredentials(t *testing.T) {
 	}
 }
 
+func TestShadowEndpointsExposeSignalsWithoutOrders(t *testing.T) {
+	service := &fakeShadowService{}
+	server := newTestServer(t, Config{AdminToken: "secret", DailyLossLimit: 0.03, Shadow: service})
+
+	response := getAuthorized(t, server.Handler(), "/api/v1/shadow/status")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"orders_sent":0`) {
+		t.Fatalf("shadow-статус не прочитан: %d %s", response.Code, response.Body.String())
+	}
+	response = getAuthorized(t, server.Handler(), "/api/v1/shadow/signals?limit=10")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"order_sent":false`) {
+		t.Fatalf("shadow-сигналы не прочитаны: %d %s", response.Code, response.Body.String())
+	}
+	response = getAuthorized(t, server.Handler(), "/api/v1/status")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"live_trading":false`) ||
+		!strings.Contains(response.Body.String(), `"shadow_trading":true`) {
+		t.Fatalf("общий статус нарушает safety-инвариант: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestShadowEndpointDisabledWithoutDurableService(t *testing.T) {
+	server := newTestServer(t, Config{AdminToken: "secret", DailyLossLimit: 0.03})
+	response := getAuthorized(t, server.Handler(), "/api/v1/shadow/status")
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ожидался код 503, получен %d: %s", response.Code, response.Body.String())
+	}
+}
+
 type recordingNotifier struct {
 	events []alert.Event
 }
@@ -143,6 +172,8 @@ type fakePaperBroker struct {
 }
 
 type fakeTestnetBroker struct{}
+
+type fakeShadowService struct{}
 
 func (*fakePaperBroker) Enabled() bool { return true }
 func (b *fakePaperBroker) Mark(context.Context, paper.MarkRequest) (paper.MarkResult, error) {
@@ -187,6 +218,26 @@ func (*fakeTestnetBroker) Reconcile(context.Context, string) (testexchange.Order
 	return testexchange.Order{ID: 1, Status: testexchange.StatusValidated}, nil
 }
 
+func (*fakeShadowService) Enabled() bool             { return true }
+func (*fakeShadowService) Run(context.Context) error { return nil }
+func (*fakeShadowService) Status(context.Context) (shadow.Status, error) {
+	lastEvent := time.Now().UTC()
+	return shadow.Status{
+		Enabled: true, Mode: "shadow", MarketDataSource: "Binance Spot public market data",
+		Symbols: []string{"BTCUSDT"}, Interval: "1m", Leader: true, Connected: true,
+		LastEventAt: &lastEvent, CandlesProcessed: 120, SignalsGenerated: 1, OrdersSent: 0,
+	}, nil
+}
+func (*fakeShadowService) Signals(context.Context, int) ([]shadow.Signal, error) {
+	return []shadow.Signal{{
+		ID: 1, Symbol: "BTCUSDT", Interval: "1m", CandleTime: time.Now().UTC(),
+		ClosePrice: 100, Action: domain.SignalBuy, EligibleForOrder: true, OrderSent: false,
+	}}, nil
+}
+func (*fakeShadowService) Candles(context.Context, string, int) ([]shadow.MarketCandle, error) {
+	return []shadow.MarketCandle{}, nil
+}
+
 func (failingNotifier) Enabled() bool { return true }
 func (failingNotifier) Notify(context.Context, alert.Event) error {
 	return errors.New("тестовая ошибка доставки")
@@ -210,6 +261,15 @@ func newTestServer(t *testing.T, config Config) *Server {
 func postAuthorized(t *testing.T, handler http.Handler, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func getAuthorized(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, path, nil)
 	request.Header.Set("Authorization", "Bearer secret")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

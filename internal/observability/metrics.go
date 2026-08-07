@@ -28,6 +28,41 @@ type Metrics struct {
 	testnetUnknown    atomic.Uint64
 	testnetRejected   atomic.Uint64
 	testnetErrors     atomic.Uint64
+	shadowEnabled     atomic.Uint32
+	shadowConnected   atomic.Uint32
+	shadowLeader      atomic.Uint32
+	shadowLastEvent   atomic.Int64
+	shadowCandles     atomic.Int64
+	shadowSignals     atomic.Int64
+	shadowReconnects  atomic.Int64
+}
+
+func (m *Metrics) SetShadow(
+	enabled, connected, leader bool,
+	lastEvent *time.Time,
+	candles, signals, reconnects int64,
+) {
+	if enabled {
+		m.shadowEnabled.Store(1)
+	} else {
+		m.shadowEnabled.Store(0)
+	}
+	if connected {
+		m.shadowConnected.Store(1)
+	} else {
+		m.shadowConnected.Store(0)
+	}
+	if leader {
+		m.shadowLeader.Store(1)
+	} else {
+		m.shadowLeader.Store(0)
+	}
+	if lastEvent != nil {
+		m.shadowLastEvent.Store(lastEvent.Unix())
+	}
+	m.shadowCandles.Store(candles)
+	m.shadowSignals.Store(signals)
+	m.shadowReconnects.Store(reconnects)
 }
 
 func (m *Metrics) ObserveTestnetOrder(status string) {
@@ -147,13 +182,36 @@ func (m *Metrics) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 			"tradingmaster_testnet_orders_total{status=\"submitted\"} %d\n"+
 			"tradingmaster_testnet_orders_total{status=\"unknown\"} %d\n"+
 			"tradingmaster_testnet_orders_total{status=\"rejected\"} %d\n"+
-			"tradingmaster_testnet_orders_total{status=\"error\"} %d\n",
+			"tradingmaster_testnet_orders_total{status=\"error\"} %d\n"+
+			"# HELP tradingmaster_shadow_enabled Включён ли безопасный shadow-режим.\n"+
+			"# TYPE tradingmaster_shadow_enabled gauge\n"+
+			"tradingmaster_shadow_enabled %d\n"+
+			"# HELP tradingmaster_shadow_connected Подключён ли лидер к публичному Binance WebSocket.\n"+
+			"# TYPE tradingmaster_shadow_connected gauge\n"+
+			"tradingmaster_shadow_connected %d\n"+
+			"# HELP tradingmaster_shadow_leader Является ли экземпляр лидером shadow-потока.\n"+
+			"# TYPE tradingmaster_shadow_leader gauge\n"+
+			"tradingmaster_shadow_leader %d\n"+
+			"# HELP tradingmaster_shadow_last_event_timestamp_seconds Время последнего события публичного рынка.\n"+
+			"# TYPE tradingmaster_shadow_last_event_timestamp_seconds gauge\n"+
+			"tradingmaster_shadow_last_event_timestamp_seconds %d\n"+
+			"# HELP tradingmaster_shadow_candles_processed Общее число сохранённых shadow-свечей.\n"+
+			"# TYPE tradingmaster_shadow_candles_processed gauge\n"+
+			"tradingmaster_shadow_candles_processed %d\n"+
+			"# HELP tradingmaster_shadow_signals_generated Общее число рассчитанных shadow-сигналов.\n"+
+			"# TYPE tradingmaster_shadow_signals_generated gauge\n"+
+			"tradingmaster_shadow_signals_generated %d\n"+
+			"# HELP tradingmaster_shadow_reconnects Общее число переподключений публичного market-data потока.\n"+
+			"# TYPE tradingmaster_shadow_reconnects gauge\n"+
+			"tradingmaster_shadow_reconnects %d\n",
 		m.backtests.Load(), m.errors.Load(), m.duration.Load(), m.killSwitch.Load(),
 		math.Float64frombits(m.dailyLoss.Load()), math.Float64frombits(m.dailyLimit.Load()),
 		m.safetyTransitions.Load(), m.alertsSent.Load(), m.alertsFailed.Load(),
 		m.durableStore.Load(), math.Float64frombits(m.paperEquity.Load()),
 		m.paperFilled.Load(), m.paperRejected.Load(), m.paperErrors.Load(),
 		m.testnetValidated.Load(), m.testnetSubmitted.Load(), m.testnetUnknown.Load(),
-		m.testnetRejected.Load(), m.testnetErrors.Load(),
+		m.testnetRejected.Load(), m.testnetErrors.Load(), m.shadowEnabled.Load(), m.shadowConnected.Load(),
+		m.shadowLeader.Load(), m.shadowLastEvent.Load(), m.shadowCandles.Load(),
+		m.shadowSignals.Load(), m.shadowReconnects.Load(),
 	)
 }

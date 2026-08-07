@@ -12,6 +12,7 @@
 | database | Пул PostgreSQL и миграции с checksum и advisory lock |
 | paper | Тестовый broker, портфель и журнал заявок/исполнений |
 | testexchange | Binance Spot Testnet, HMAC-подпись, идемпотентность и reconciliation |
+| shadow | Публичные live-свечи Binance, стратегия и append-only сигналы без отправки заявок |
 | alert | Telegram-уведомления без влияния сбоя доставки на блокировку |
 | backtest | Событийный цикл, комиссии, проскальзывание и статистика |
 | httpapi | Health endpoints, API, встроенная русская веб-панель и защита входных данных |
@@ -24,6 +25,8 @@ Paper broker выполняет заявку, изменение портфел�
 Журнал событий заявок и исполнений доступен только для добавления: UPDATE и DELETE отклоняются триггерами PostgreSQL. Текущее состояние заявки хранится отдельно, поэтому чтение не требует сворачивать весь поток событий.
 
 Testnet-адаптер работает только с официальным адресом Binance Spot Testnet. Каждая команда требует `idempotency_key`; из него детерминированно формируется `clientOrderId`. Если ответ matching engine потерян или вернулся HTTP 5xx, адаптер запрашивает заявку по этому ID и сохраняет результат сверки. Резервирование, итоговое состояние и события записываются в общий PostgreSQL, поэтому несколько pod’ов не создают дубли.
+
+Shadow-контур использует официальный публичный Binance REST endpoint для начальной истории и WebSocket для закрытых свечей. PostgreSQL advisory lock выбирает одного получателя потока между Kubernetes-репликами; дополнительная транзакционная блокировка и уникальный ключ свечи защищают от дублей после переподключения. Каждая закрытая свеча и каждое решение стратегии записываются в append-only таблицы. Поле `order_sent` имеет жёсткое ограничение `false`, а пакет не содержит broker или HTTP-клиент для создания биржевых заявок.
 
 Веб-панель компилируется внутрь Go-бинарника через `embed` и обращается к тому же API по same-origin. После проверки `TM_ADMIN_TOKEN` сервер создаёт stateless HMAC-подписанную HttpOnly cookie; секрет CSRF передаётся только в защищённую HTML-страницу. Сессия работает между репликами без sticky sessions, не содержит admin token и становится недействительной после его ротации. Bearer-аутентификация сохранена для CLI и автоматизации.
 
@@ -59,6 +62,21 @@ sequenceDiagram
     DB-->>API: COMMIT
 ~~~
 
+~~~mermaid
+sequenceDiagram
+    participant L as Shadow-лидер
+    participant B as Binance public market data
+    participant S as Safety-state
+    participant DB as PostgreSQL
+    L->>B: Загрузить закрытую историю REST
+    L->>DB: Добавить новые свечи
+    L->>B: Подключиться к WebSocket kline
+    B-->>L: Закрытая свеча
+    L->>S: Проверить блокировку нового входа
+    L->>DB: Записать сигнал, order_sent=false
+    Note over L,DB: Интерфейса отправки заявки нет
+~~~
+
 ## Последовательность одной свечи
 
 ~~~mermaid
@@ -87,4 +105,4 @@ Live-режим нельзя делать простой заменой CSV на
 6. алерты по расхождению локальной и биржевой позиции;
 7. отдельный проверенный production-адаптер с ручным разрешением и лимитами.
 
-Durable safety-store, paper broker, testnet-адаптер, идемпотентность заявок и reconciliation по `clientOrderId` уже реализованы. При отсутствии PostgreSQL локальный API может работать только в исследовательском режиме: paper trading и testnet отключаются, а статус сообщает `durable_safety_store: false`. `/api/v1/status` продолжает сообщать `live_trading: false`, потому что production API программно запрещён.
+Durable safety-store, paper broker, testnet-адаптер, идемпотентность заявок, reconciliation по `clientOrderId` и первый публичный market-data контур уже реализованы. Shadow-поток позволяет измерять поведение стратегии на актуальном рынке, но не решает сверку реального баланса, sequence gaps стакана, outbox и production-риск. При отсутствии PostgreSQL локальный API может работать только в исследовательском режиме: paper trading, testnet и shadow отключаются, а статус сообщает `durable_safety_store: false`. `/api/v1/status` продолжает сообщать `live_trading: false`, потому что production API программно запрещён.

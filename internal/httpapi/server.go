@@ -19,6 +19,7 @@ import (
 	"github.com/PCenjoyer/TradingMaster/internal/paper"
 	"github.com/PCenjoyer/TradingMaster/internal/risk"
 	"github.com/PCenjoyer/TradingMaster/internal/safety"
+	"github.com/PCenjoyer/TradingMaster/internal/shadow"
 	"github.com/PCenjoyer/TradingMaster/internal/strategy"
 	"github.com/PCenjoyer/TradingMaster/internal/testexchange"
 )
@@ -40,6 +41,7 @@ type Config struct {
 	Safety            *safety.Controller
 	Paper             paper.Broker
 	TestExchange      testexchange.Broker
+	Shadow            shadow.Service
 }
 
 func DefaultConfig() Config {
@@ -53,6 +55,7 @@ type Server struct {
 	notifier     alert.Notifier
 	paper        paper.Broker
 	testExchange testexchange.Broker
+	shadow       shadow.Service
 	adminToken   string
 	version      string
 	ui           *uiController
@@ -97,7 +100,7 @@ func NewServer(logger *slog.Logger, version string, configs ...Config) (*Server,
 	}
 	server := &Server{
 		logger: logger, metrics: metrics, safety: controller, notifier: config.Notifier,
-		paper: config.Paper, testExchange: config.TestExchange,
+		paper: config.Paper, testExchange: config.TestExchange, shadow: config.Shadow,
 		adminToken: config.AdminToken, version: version,
 	}
 	server.ui, err = newUIController(config.AdminToken, version)
@@ -132,6 +135,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/testnet/orders", s.requireAdmin(s.testnetOrder))
 	mux.HandleFunc("GET /api/v1/testnet/orders", s.requireAdmin(s.testnetOrders))
 	mux.HandleFunc("POST /api/v1/testnet/orders/{idempotency_key}/reconcile", s.requireAdmin(s.testnetReconcile))
+	mux.HandleFunc("GET /api/v1/shadow/status", s.requireAdmin(s.shadowStatus))
+	mux.HandleFunc("GET /api/v1/shadow/signals", s.requireAdmin(s.shadowSignals))
+	mux.HandleFunc("GET /api/v1/shadow/candles", s.requireAdmin(s.shadowCandles))
 	mux.HandleFunc("GET /metrics", s.metricsEndpoint)
 	return s.recoverPanic(s.logRequests(mux))
 }
@@ -162,12 +168,22 @@ func (s *Server) status(writer http.ResponseWriter, request *http.Request) {
 	}
 	paperEnabled := s.paper != nil && s.paper.Enabled()
 	testnetEnabled := s.testExchange != nil && s.testExchange.Enabled()
+	shadowEnabled := s.shadow != nil && s.shadow.Enabled()
 	mode := "исследование и бэктест"
 	if paperEnabled {
 		mode = "исследование, бэктест и paper-trading"
 	}
 	if testnetEnabled {
 		mode += " и Binance Spot Testnet"
+	}
+	if shadowEnabled {
+		mode += " и shadow trading на публичном рынке"
+	}
+	shadowConnected := false
+	if shadowEnabled {
+		if shadowState, shadowErr := s.shadow.Status(request.Context()); shadowErr == nil {
+			shadowConnected = shadowState.Connected
+		}
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"service": "TradingMaster", "version": s.version,
@@ -178,6 +194,9 @@ func (s *Server) status(writer http.ResponseWriter, request *http.Request) {
 		"safety_admin_enabled":   s.adminToken != "",
 		"telegram_enabled":       s.notifier.Enabled(),
 		"paper_trading":          paperEnabled,
+		"shadow_trading":         shadowEnabled,
+		"shadow_connected":       shadowConnected,
+		"shadow_orders_sent":     0,
 		"test_exchange_enabled":  testnetEnabled,
 		"test_exchange":          "Binance Spot Testnet",
 		"test_exchange_order_mode": func() string {
@@ -187,6 +206,77 @@ func (s *Server) status(writer http.ResponseWriter, request *http.Request) {
 			return string(s.testExchange.Mode())
 		}(),
 	})
+}
+
+func (s *Server) shadowStatus(writer http.ResponseWriter, request *http.Request) {
+	if !s.shadowEnabled(writer) {
+		return
+	}
+	status, err := s.shadow.Status(request.Context())
+	if err != nil {
+		s.logger.Error("состояние shadow trading не прочитано", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "shadow trading недоступен"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) shadowSignals(writer http.ResponseWriter, request *http.Request) {
+	if !s.shadowEnabled(writer) {
+		return
+	}
+	limit, ok := queryLimit(writer, request, 50, 200)
+	if !ok {
+		return
+	}
+	signals, err := s.shadow.Signals(request.Context(), limit)
+	if err != nil {
+		s.logger.Error("shadow-сигналы не прочитаны", "ошибка", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "shadow-журнал недоступен"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"signals": signals})
+}
+
+func (s *Server) shadowCandles(writer http.ResponseWriter, request *http.Request) {
+	if !s.shadowEnabled(writer) {
+		return
+	}
+	limit, ok := queryLimit(writer, request, 100, 1_000)
+	if !ok {
+		return
+	}
+	candles, err := s.shadow.Candles(request.Context(), request.URL.Query().Get("symbol"), limit)
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "shadow-свечи не прочитаны", err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"candles": candles})
+}
+
+func (s *Server) shadowEnabled(writer http.ResponseWriter) bool {
+	if s.shadow == nil || !s.shadow.Enabled() {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+			"error": "shadow trading отключён: настройте durable PostgreSQL и TM_SHADOW_ENABLED",
+		})
+		return false
+	}
+	return true
+}
+
+func queryLimit(writer http.ResponseWriter, request *http.Request, fallback, maximum int) (int, bool) {
+	limit := fallback
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > maximum {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("limit должен быть от 1 до %d", maximum),
+			})
+			return 0, false
+		}
+		limit = parsed
+	}
+	return limit, true
 }
 
 func (s *Server) testnetStatus(writer http.ResponseWriter, request *http.Request) {
@@ -315,6 +405,16 @@ func (s *Server) metricsEndpoint(writer http.ResponseWriter, request *http.Reque
 		if portfolio, portfolioErr := s.paper.Portfolio(request.Context()); portfolioErr == nil {
 			s.metrics.SetPaperEquity(portfolio.Equity)
 		}
+	}
+	if s.shadow != nil && s.shadow.Enabled() {
+		if status, shadowErr := s.shadow.Status(request.Context()); shadowErr == nil {
+			s.metrics.SetShadow(
+				true, status.Connected, status.Leader, status.LastEventAt,
+				status.CandlesProcessed, status.SignalsGenerated, status.Reconnects,
+			)
+		}
+	} else {
+		s.metrics.SetShadow(false, false, false, nil, 0, 0, 0)
 	}
 	s.metrics.ServeHTTP(writer, request)
 }

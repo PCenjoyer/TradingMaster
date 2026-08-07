@@ -1,6 +1,6 @@
 # TradingMaster
 
-TradingMaster — собственный движок алгоритмической торговли на Go. Текущая версия предназначена для исследования стратегий, воспроизводимых бэктестов, paper-trading и Binance Spot Testnet. Отправка заявок с реальными средствами намеренно запрещена.
+TradingMaster — собственный движок алгоритмической торговли на Go. Текущая версия предназначена для исследования стратегий, воспроизводимых бэктестов, paper-trading, Binance Spot Testnet и shadow-проверки сигналов на публичных live-котировках. Отправка заявок с реальными средствами намеренно запрещена.
 
 > Важно: проект не обещает доходность и не является инвестиционной рекомендацией. Результаты на истории не гарантируют будущий результат. Сначала используйте только исторические данные и тестовый счёт.
 
@@ -14,6 +14,7 @@ TradingMaster — собственный движок алгоритмическ
 - общий durable safety-store в PostgreSQL с атомарной координацией нескольких экземпляров;
 - paper broker с рыночными заявками, портфелем и append-only журналом заявок и исполнений;
 - Binance Spot Testnet с HMAC-подписью, идемпотентными client order ID, reconciliation и durable-журналом;
+- shadow trading на публичных свечах Binance Spot через WebSocket: backfill, переподключение, выбор одного лидера между репликами и append-only журнал сигналов без интерфейса отправки заявок;
 - встроенная русская веб-панель без React: safety-контроль, paper-портфель и Binance Spot Testnet в том же Go-бинарнике;
 - комиссии, проскальзывание и гэпы через стоп;
 - метрики: доходность, максимальная просадка, Sharpe, profit factor, win rate и экспозиция;
@@ -54,9 +55,14 @@ go run ./cmd/tradingmaster -mode api
 - POST http://localhost:8080/api/v1/testnet/orders — валидация или отправка тестовой заявки;
 - GET http://localhost:8080/api/v1/testnet/orders — durable-журнал тестовых заявок;
 - POST http://localhost:8080/api/v1/testnet/orders/{idempotency_key}/reconcile — сверка неоднозначной заявки;
+- GET http://localhost:8080/api/v1/shadow/status — состояние публичного market-data потока;
+- GET http://localhost:8080/api/v1/shadow/signals — последние shadow-сигналы;
+- GET http://localhost:8080/api/v1/shadow/candles?symbol=BTCUSDT — сохранённые закрытые свечи;
 - GET http://localhost:8080/metrics — метрики.
 
-Откройте http://localhost:8080/ui и войдите значением `TM_ADMIN_TOKEN`. Токен проверяется только при входе: браузер получает подписанную HttpOnly session cookie на 12 часов, а сам токен не записывается в `localStorage` или `sessionStorage`. Из панели можно управлять kill switch, видеть дневной лимит, работать с paper-портфелем и Binance Spot Testnet. Реальная торговля в интерфейсе отсутствует и программно отключена.
+Откройте http://localhost:8080/ui и войдите значением `TM_ADMIN_TOKEN`. Токен проверяется только при входе: браузер получает подписанную HttpOnly session cookie на 12 часов, а сам токен не записывается в `localStorage` или `sessionStorage`. Из панели можно управлять kill switch, видеть дневной лимит, работать с paper-портфелем и Binance Spot Testnet, а также наблюдать live shadow-сигналы. Реальная торговля в интерфейсе отсутствует и программно отключена.
+
+Чтобы включить безопасное наблюдение за рынком, задайте в `.env` `TM_SHADOW_ENABLED=true`. Контур использует только публичные данные, не принимает API-ключи и всегда возвращает `orders_sent: 0`.
 
 Запуск в контейнере:
 
@@ -110,6 +116,9 @@ flowchart LR
     A --> P
     A --> T["Binance Spot Testnet"]
     T --> J
+    W["Binance public WebSocket"] --> H["Shadow trading: только сигналы"]
+    H --> J
+    H --> A
 ~~~
 
 Границы компонентов и путь к live-trading описаны в [docs/architecture.md](docs/architecture.md).
@@ -143,7 +152,7 @@ kubectl kustomize deploy/k8s
 kubectl kustomize monitoring
 ~~~
 
-CI запускает аналогичные проверки на каждом PR и поднимает PostgreSQL для интеграционных тестов миграций, блокировок, paper broker, testnet-идемпотентности и append-only журналов. Тег v* публикует multi-arch образ в ghcr.io/pcenjoyer/tradingmaster. Развёртывание запускается вручную workflow «Развёртывание в EKS», чтобы случайный push не менял production.
+CI запускает аналогичные проверки на каждом PR и поднимает PostgreSQL для интеграционных тестов миграций, блокировок, paper broker, testnet-идемпотентности, shadow safety-инвариантов и append-only журналов. Тег v* публикует multi-arch образ в ghcr.io/pcenjoyer/tradingmaster. Развёртывание запускается вручную workflow «Развёртывание в EKS», чтобы случайный push не менял production.
 
 ## Безопасность и источники
 
@@ -151,6 +160,7 @@ CI запускает аналогичные проверки на каждом 
 - Database URL, admin token, Telegram credentials и тестовые биржевые ключи загружаются только из окружения или Kubernetes Secret.
 - Веб-панель использует HttpOnly SameSite=Strict cookie, CSRF-токен и строгую Content Security Policy; admin token не сохраняется в браузерном хранилище.
 - Testnet-адаптер принимает только `https://testnet.binance.vision`; production endpoint нельзя включить переменной окружения.
+- Shadow-контур принимает рыночные данные только с официальных публичных Binance REST/WebSocket endpoint и не содержит broker-интерфейса.
 - Kubernetes-профиль следует официальному [Restricted Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/).
 - Terraform state использует [S3 locking через lockfile](https://developer.hashicorp.com/terraform/language/backend/s3), а бакет имеет versioning и запрет публичного доступа.
 - Подключение к закрытому EKS описано в [документации AWS](https://docs.aws.amazon.com/eks/latest/userguide/create-kubeconfig.html).

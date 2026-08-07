@@ -66,3 +66,11 @@ spec:
           annotations:
             summary: "TradingMaster: ошибка адаптера тестовой биржи"
             description: "За последние 5 минут адаптер Binance Spot Testnet не смог обработать хотя бы одну заявку."
+        - alert: TradingMasterShadowDisconnected
+          expr: max(tradingmaster_shadow_enabled) == 1 and max(tradingmaster_shadow_connected) == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: shadow-поток отключён"
+            description: "Shadow trading включён, но ни один экземпляр не видит подключённый публичный Binance WebSocket."

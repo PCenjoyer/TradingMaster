@@ -83,3 +83,24 @@ func TestTestnetReceiveWindowMustBeInteger(t *testing.T) {
 		t.Fatal("дробный receive window должен быть отклонён")
 	}
 }
+
+func TestShadowConfigFromEnvironment(t *testing.T) {
+	t.Setenv("TM_SHADOW_SYMBOLS", "ethusdt,BTCUSDT")
+	t.Setenv("TM_SHADOW_INTERVAL", "5m")
+	t.Setenv("TM_SHADOW_HISTORY_LIMIT", "240")
+	config, err := shadowConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Symbols) != 2 || config.Symbols[0] != "ethusdt" ||
+		config.Interval != "5m" || config.HistoryLimit != 240 {
+		t.Fatalf("неожиданная shadow-конфигурация: %#v", config)
+	}
+}
+
+func TestShadowHistoryLimitMustBeInteger(t *testing.T) {
+	t.Setenv("TM_SHADOW_HISTORY_LIMIT", "120.5")
+	if _, err := shadowConfigFromEnv(); err == nil {
+		t.Fatal("дробный history limit должен быть отклонён")
+	}
+}

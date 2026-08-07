@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/PCenjoyer/TradingMaster/internal/paper"
 	"github.com/PCenjoyer/TradingMaster/internal/risk"
 	"github.com/PCenjoyer/TradingMaster/internal/safety"
+	"github.com/PCenjoyer/TradingMaster/internal/shadow"
 	"github.com/PCenjoyer/TradingMaster/internal/strategy"
 	"github.com/PCenjoyer/TradingMaster/internal/testexchange"
 )
@@ -84,7 +86,12 @@ func serve(address string) error {
 	}
 	var paperBroker paper.Broker
 	var testnetBroker testexchange.Broker
+	var shadowService shadow.Service
 	testnetEnabled, err := envBool("TM_BINANCE_TESTNET_ENABLED", false)
+	if err != nil {
+		return err
+	}
+	shadowEnabled, err := envBool("TM_SHADOW_ENABLED", false)
 	if err != nil {
 		return err
 	}
@@ -92,6 +99,9 @@ func serve(address string) error {
 	if databaseURL == "" {
 		if testnetEnabled {
 			return fmt.Errorf("Binance Spot Testnet требует TM_DATABASE_URL для durable-журнала")
+		}
+		if shadowEnabled {
+			return fmt.Errorf("shadow trading требует TM_DATABASE_URL для durable-журнала и выбора лидера")
 		}
 		logger.Warn("PostgreSQL не настроен: safety-state хранится в памяти, paper trading отключён")
 	} else {
@@ -128,12 +138,23 @@ func serve(address string) error {
 			}
 			logger.Info("подключён Binance Spot Testnet", "режим_заявок", testnetBroker.Mode())
 		}
+		if shadowEnabled {
+			shadowConfig, configErr := shadowConfigFromEnv()
+			if configErr != nil {
+				return configErr
+			}
+			shadowService, err = shadow.NewPostgresService(pool, controller, logger, shadowConfig)
+			if err != nil {
+				return err
+			}
+			logger.Info("подключён shadow trading", "символы", shadowConfig.Symbols, "интервал", shadowConfig.Interval)
+		}
 		logger.Info("подключено общее PostgreSQL-хранилище", "paper_trading", true)
 	}
 	api, err := httpapi.NewServer(logger, version, httpapi.Config{
 		AdminToken: adminToken, DailyLossLimit: dailyLossLimit,
 		InitialKillSwitch: initialKillSwitch, Notifier: notifier,
-		Safety: controller, Paper: paperBroker, TestExchange: testnetBroker,
+		Safety: controller, Paper: paperBroker, TestExchange: testnetBroker, Shadow: shadowService,
 	})
 	if err != nil {
 		return fmt.Errorf("настроить API: %w", err)
@@ -146,6 +167,14 @@ func serve(address string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	serverErrors := make(chan error, 1)
+	workerErrors := make(chan error, 1)
+	if shadowService != nil && shadowService.Enabled() {
+		go func() {
+			if err := shadowService.Run(ctx); err != nil {
+				workerErrors <- err
+			}
+		}()
+	}
 	go func() {
 		logger.Info("HTTP-сервер запущен", "адрес", address, "версия", version)
 		serverErrors <- server.ListenAndServe()
@@ -157,6 +186,8 @@ func serve(address string) error {
 			return fmt.Errorf("HTTP-сервер: %w", err)
 		}
 		return nil
+	case err := <-workerErrors:
+		return fmt.Errorf("shadow trading: %w", err)
 	case <-ctx.Done():
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -238,6 +269,18 @@ func envBool(name string, fallback bool) (bool, error) {
 	return value, nil
 }
 
+func envInt(name string, fallback int) (int, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s должно быть целым числом: %w", name, err)
+	}
+	return value, nil
+}
+
 func notifierFromEnv() (alert.Notifier, error) {
 	token := os.Getenv("TM_TELEGRAM_BOT_TOKEN")
 	chatID := os.Getenv("TM_TELEGRAM_CHAT_ID")
@@ -279,5 +322,18 @@ func testnetConfigFromEnv() (testexchange.Config, error) {
 		SecretKey:     os.Getenv("TM_BINANCE_TESTNET_SECRET_KEY"),
 		Mode:          testexchange.Mode(envOrDefault("TM_BINANCE_TESTNET_ORDER_MODE", string(testexchange.ModeValidate))),
 		ReceiveWindow: time.Duration(int64(receiveWindowMilliseconds)) * time.Millisecond,
+	}, nil
+}
+
+func shadowConfigFromEnv() (shadow.Config, error) {
+	historyLimit, err := envInt("TM_SHADOW_HISTORY_LIMIT", 120)
+	if err != nil {
+		return shadow.Config{}, err
+	}
+	rawSymbols := envOrDefault("TM_SHADOW_SYMBOLS", "BTCUSDT")
+	symbols := strings.Split(rawSymbols, ",")
+	return shadow.Config{
+		Symbols: symbols, Interval: envOrDefault("TM_SHADOW_INTERVAL", "1m"),
+		HistoryLimit: historyLimit, Strategy: strategy.DefaultConfig(),
 	}, nil
 }

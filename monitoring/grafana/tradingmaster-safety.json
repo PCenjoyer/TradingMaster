@@ -385,6 +385,128 @@
       ],
       "title": "Заявки Binance Spot Testnet за 15 минут",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "Нет соединения"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "Поток подключён"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 22
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "expr": "max(tradingmaster_shadow_connected)",
+          "legendFormat": "Shadow WebSocket",
+          "refId": "A"
+        }
+      ],
+      "title": "Публичный shadow-поток",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 16,
+        "x": 8,
+        "y": 22
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "max(tradingmaster_shadow_candles_processed)",
+          "legendFormat": "Свечи",
+          "refId": "A"
+        },
+        {
+          "expr": "max(tradingmaster_shadow_signals_generated)",
+          "legendFormat": "Сигналы",
+          "refId": "B"
+        },
+        {
+          "expr": "max(tradingmaster_shadow_reconnects)",
+          "legendFormat": "Переподключения",
+          "refId": "C"
+        }
+      ],
+      "title": "Shadow trading",
+      "type": "timeseries"
     }
   ],
   "refresh": "15s",
@@ -393,7 +515,8 @@
     "tradingmaster",
     "безопасность",
     "paper-trading",
-    "testnet"
+    "testnet",
+    "shadow"
   ],
   "templating": {
     "list": []
@@ -404,8 +527,8 @@
   },
   "timepicker": {},
   "timezone": "utc",
-  "title": "TradingMaster — безопасность, paper-trading и testnet",
+  "title": "TradingMaster — безопасность, paper, shadow и testnet",
   "uid": "tradingmaster-safety",
-  "version": 3,
+  "version": 4,
   "weekStart": "monday"
 }

@@ -85,17 +85,18 @@ curl http://localhost:8080/metrics
 
 После `port-forward` откройте http://localhost:8080/ui и войдите значением `TM_ADMIN_TOKEN`. Отдельный frontend-сервис не требуется: HTML, CSS и JavaScript встроены в Go-бинарник и поставляются в том же контейнере.
 
-Панель показывает состояние сервиса, kill switch и дневной лимит, paper-портфель, позиции, журналы заявок, соединение и тестовые балансы Binance Spot Testnet. Из неё можно:
+Панель показывает состояние сервиса, kill switch и дневной лимит, paper-портфель, позиции, журналы заявок, публичный shadow-поток, соединение и тестовые балансы Binance Spot Testnet. Из неё можно:
 
 - включить или снять ручной kill switch;
 - создать paper-заявку и обновить виртуальную рыночную цену;
+- наблюдать рассчитанные на публичных live-свечах shadow-сигналы и их блокировку safety-контуром;
 - отправить заявку только в Binance Spot Testnet и сверить неоднозначный статус.
 
 При входе admin token отправляется серверу формой и не сохраняется в `localStorage` или `sessionStorage`. Сервер выдаёт подписанную HttpOnly cookie со сроком 12 часов. Сессия не хранится в памяти pod и поэтому действует на всех репликах с одинаковым `TM_ADMIN_TOKEN`; ротация токена завершает ранее созданные сессии. Изменяющие запросы дополнительно защищены CSRF-токеном.
 
 В Kubernetes публикуйте панель только через HTTPS ingress. Тогда cookie получает флаг `Secure` по TLS или заголовку `X-Forwarded-Proto: https`. Локальный `http://localhost` оставлен рабочим только для разработки и `port-forward`.
 
-Панель намеренно показывает `LIVE OFF`: она не содержит production endpoint, не принимает реальные биржевые ключи и не может переключить `/api/v1/status` из `live_trading: false`.
+Панель намеренно показывает `LIVE OFF`: публичные котировки не дают доступ к счёту, shadow-пакет не содержит интерфейса отправки заявки, а production endpoint и реальные биржевые ключи не принимаются. Интерфейс не может переключить `/api/v1/status` из `live_trading: false`.
 
 ## 6. Настроить PostgreSQL, kill switch и Telegram
 
@@ -240,7 +241,31 @@ curl -X POST \
 
 Статус `unknown` означает, что matching engine мог принять заявку, но подтверждение не получено. Не создавайте новую заявку с другим ключом: сначала вызовите reconciliation. Новые покупки проходят через общий kill switch; продажи остаются разрешены для сокращения spot-позиции.
 
-## 9. Подключить Prometheus и Grafana
+## 9. Включить shadow trading на публичных котировках
+
+Shadow-режим безопасно прогоняет текущую Trend Breakout стратегию на закрытых свечах Binance Spot. Ключи не нужны: начальная история читается через публичный REST API, дальнейшие свечи — через публичный WebSocket. Включение требует PostgreSQL, потому что свечи, сигналы и лидер реплик должны быть durable:
+
+~~~bash
+kubectl -n tradingmaster patch configmap tradingmaster --type merge \
+  -p '{"data":{"TM_SHADOW_ENABLED":"true","TM_SHADOW_SYMBOLS":"BTCUSDT,ETHUSDT","TM_SHADOW_INTERVAL":"1m","TM_SHADOW_HISTORY_LIMIT":"120"}}'
+kubectl -n tradingmaster rollout restart deployment/tradingmaster
+kubectl -n tradingmaster rollout status deployment/tradingmaster
+~~~
+
+Проверка через admin API:
+
+~~~bash
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost:8080/api/v1/shadow/status
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:8080/api/v1/shadow/signals?limit=50'
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:8080/api/v1/shadow/candles?symbol=BTCUSDT&limit=120'
+~~~
+
+Допустимы от 1 до 10 символов и интервалы `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`. Только один pod удерживает PostgreSQL advisory lock и подключается к WebSocket; остальные читают общий runtime и готовы стать лидером после сбоя. Таблицы свечей и сигналов append-only. Для каждого сигнала API явно возвращает `order_sent: false`, а ограничение PostgreSQL запрещает сохранить `true`.
+
+## 10. Подключить Prometheus и Grafana
 
 Каталог monitoring требует CRD от Prometheus Operator, например установленного kube-prometheus-stack:
 
@@ -250,11 +275,11 @@ kubectl apply -k monitoring
 
 ServiceMonitor и PrometheusRule по умолчанию имеют label release=kube-prometheus-stack. Если Helm release называется иначе, замените label перед применением. Grafana sidecar обнаруживает ConfigMap по label grafana_dashboard=1 и загружает dashboard «TradingMaster — безопасность и paper-trading».
 
-Dashboard показывает kill switch, тип safety-store, дневной убыток, paper equity, paper-заявки и результаты Binance Spot Testnet. Prometheus создаёт critical alert при активной блокировке, локальном safety-store или неизвестном состоянии testnet-заявки и warning при использовании 80% дневного лимита.
+Dashboard показывает kill switch, тип safety-store, дневной убыток, paper equity, paper-заявки, состояние shadow-потока и результаты Binance Spot Testnet. Prometheus создаёт critical alert при активной блокировке, локальном safety-store или неизвестном состоянии testnet-заявки; warning — при использовании 80% дневного лимита и отключении включённого shadow-потока.
 
 ## Ограничение текущей версии
 
-Paper broker не отправляет заявки на биржу и принимает цену исполнения от вызывающей стороны. Testnet-адаптер уже имеет idempotency key, durable-журнал и reconciliation заявок, но пока нет биржевого market-data stream, сверки всего баланса/позиций и outbox. Включать торговлю реальными средствами нельзя; `/api/v1/status` продолжает возвращать `live_trading: false`.
+Paper broker не отправляет заявки на биржу и принимает цену исполнения от вызывающей стороны. Shadow-контур уже получает публичные закрытые свечи, но намеренно не имеет отправки заявок. Testnet-адаптер имеет idempotency key, durable-журнал и reconciliation заявок, однако пока нет сверки всего реального баланса и позиций, контроля sequence gaps стакана и transactional outbox. Включать торговлю реальными средствами нельзя; `/api/v1/status` продолжает возвращать `live_trading: false`.
 
 ## Откат
 

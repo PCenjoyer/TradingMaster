@@ -81,8 +81,11 @@ function renderStatus(status) {
   setText("paper-state", enabled(status.paper_trading));
   setText("testnet-state", enabled(status.test_exchange_enabled));
   setText("testnet-mode", status.test_exchange_enabled ? `Режим: ${status.test_exchange_order_mode}` : "Тестовая биржа не настроена");
+  setText("shadow-state", enabled(status.shadow_trading));
+  setText("shadow-mode", status.shadow_trading ? (status.shadow_connected ? "Поток подключён, заявок: 0" : "Ожидание потока, заявок: 0") : "Публичные котировки отключены");
   setAvailability("paper", Boolean(status.paper_trading));
   setAvailability("testnet", Boolean(status.test_exchange_enabled));
+  setAvailability("shadow", Boolean(status.shadow_trading));
 }
 
 function renderSafety(state) {
@@ -172,6 +175,36 @@ function renderTestnetOrders(payload) {
   }));
 }
 
+function shadowAction(action) {
+  if (action === "buy") return "Купить";
+  if (action === "sell") return "Продать";
+  return "Наблюдать";
+}
+
+function renderShadow(status, payload) {
+  setText("shadow-connected", status.connected ? (status.leader ? "Подключено · лидер" : "Подключено · общий поток") : "Нет соединения");
+  setText("shadow-symbols", `${(status.symbols || []).join(", ")} · ${status.interval}`);
+  setText("shadow-last-candle", status.last_candle_at ? when(status.last_candle_at) : "История загружается");
+  setText("shadow-orders-sent", status.orders_sent ?? 0);
+  setPill("shadow-pill", status.connected ? "Поток подключён" : "Ожидание потока", status.connected ? "safe" : "warning");
+  const tbody = element("shadow-signals");
+  const signals = payload.signals || [];
+  if (signals.length === 0) {
+    emptyRow(tbody, 7, "Сигналы появятся после загрузки истории и закрытия свечи");
+    return;
+  }
+  tbody.replaceChildren(...signals.map((signal) => {
+    const row = document.createElement("tr");
+    appendCells(row, [
+      when(signal.candle_time), signal.symbol, amount(signal.close_price),
+      shadowAction(signal.action), signal.reason,
+      signal.blocked ? `Заблокировано: ${signal.block_reason || "safety"}` : (signal.eligible_for_order ? "Прошёл проверки" : "Не требуется"),
+      signal.order_sent ? "Отправлена" : "Не отправлялась",
+    ]);
+    return row;
+  }));
+}
+
 async function loadAll(silent = false) {
   if (!silent) setText("global-message", "Обновляем данные…");
   try {
@@ -190,6 +223,12 @@ async function loadAll(silent = false) {
         .then(([testnetStatus, account, orders]) => { renderTestnet(testnetStatus, account); renderTestnetOrders(orders); }));
     } else {
       emptyRow(element("testnet-orders"), 5, "Binance Testnet отключён");
+    }
+    if (status.shadow_trading) {
+      tasks.push(Promise.all([api("/api/v1/shadow/status"), api("/api/v1/shadow/signals?limit=30")])
+        .then(([shadowStatus, signals]) => renderShadow(shadowStatus, signals)));
+    } else {
+      emptyRow(element("shadow-signals"), 7, "Shadow trading отключён");
     }
     const results = await Promise.allSettled(tasks);
     const failed = results.find((result) => result.status === "rejected");

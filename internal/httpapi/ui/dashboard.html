@@ -25,7 +25,7 @@
   <main class="page-shell">
     <section class="live-warning" aria-label="Статус реальной торговли">
       <span class="status-dot status-safe" aria-hidden="true"></span>
-      <div><strong>Реальная торговля отключена</strong><p>Панель работает только с виртуальным paper-счётом и Binance Spot Testnet. Реальные средства не используются.</p></div>
+      <div><strong>Реальная торговля отключена</strong><p>Публичные live-котировки используются только для shadow-сигналов. Заявки доступны лишь для виртуального paper-счёта и Binance Spot Testnet; реальные средства не используются.</p></div>
       <span class="pill pill-safe">LIVE OFF</span>
     </section>
 
@@ -40,6 +40,7 @@
         <article class="status-card"><span class="card-label">Хранилище защиты</span><strong id="store-state">—</strong><small>Общее состояние между репликами</small></article>
         <article class="status-card"><span class="card-label">Paper trading</span><strong id="paper-state">—</strong><small>Виртуальный портфель</small></article>
         <article class="status-card"><span class="card-label">Binance Testnet</span><strong id="testnet-state">—</strong><small id="testnet-mode">—</small></article>
+        <article class="status-card"><span class="card-label">Shadow trading</span><strong id="shadow-state">—</strong><small id="shadow-mode">Публичные котировки, без заявок</small></article>
       </div>
     </section>
 
@@ -61,6 +62,29 @@
           </div>
           <small>Дневную блокировку нельзя снять вручную — она сбрасывается правилами safety-store.</small>
         </form>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="shadow-title">
+      <div class="panel-heading">
+        <div><p class="eyebrow">Наблюдение за реальным рынком</p><h2 id="shadow-title">Shadow trading</h2></div>
+        <span id="shadow-pill" class="pill">Загрузка</span>
+      </div>
+      <div id="shadow-disabled" class="notice" hidden>Shadow trading отключён. Для него нужен PostgreSQL и TM_SHADOW_ENABLED=true.</div>
+      <div id="shadow-content">
+        <div class="shadow-summary">
+          <dl class="metric-list compact">
+            <div><dt>WebSocket</dt><dd id="shadow-connected">—</dd></div>
+            <div><dt>Символы и интервал</dt><dd id="shadow-symbols">—</dd></div>
+            <div><dt>Последняя свеча</dt><dd id="shadow-last-candle">—</dd></div>
+          </dl>
+          <div class="zero-orders">
+            <span class="status-dot status-safe" aria-hidden="true"></span>
+            <div><strong>Отправлено заявок: <span id="shadow-orders-sent">0</span></strong><p>Контур только рассчитывает сигналы. Интерфейса отправки заявок у него нет.</p></div>
+          </div>
+        </div>
+        <h3>Последние решения стратегии</h3>
+        <div class="table-wrap"><table><thead><tr><th>Свеча</th><th>Инструмент</th><th>Цена</th><th>Решение</th><th>Причина</th><th>Допуск</th><th>Заявка</th></tr></thead><tbody id="shadow-signals"></tbody></table></div>
       </div>
     </section>
 
