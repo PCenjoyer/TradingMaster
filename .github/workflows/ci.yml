@@ -1,0 +1,125 @@
+name: Проверка
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    env:
+      TM_TEST_DATABASE_URL: postgres://tradingmaster:tradingmaster@127.0.0.1:5432/tradingmaster?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: tradingmaster
+          POSTGRES_USER: tradingmaster
+          POSTGRES_PASSWORD: tradingmaster
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tradingmaster -d tradingmaster"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Установить Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Проверить форматирование
+        shell: bash
+        run: |
+          files="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$files" ]; then
+            echo "Требуется gofmt:"
+            echo "$files"
+            exit 1
+          fi
+      - name: Запустить тесты с детектором гонок
+        run: go test -race ./...
+      - name: Запустить статический анализ
+        run: go vet ./...
+      - name: Собрать бинарный файл
+        run: go build -trimpath ./cmd/tradingmaster
+
+  container:
+    name: Контейнер
+    needs: go
+    runs-on: ubuntu-latest
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Настроить Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Собрать образ
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          tags: tradingmaster:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  kubernetes:
+    name: Kubernetes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Установить kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+        with:
+          version: v1.36.1
+      - name: Собрать манифесты
+        run: kubectl kustomize deploy/k8s > rendered.yaml
+      - name: Проверить настройки масштабирования
+        shell: bash
+        run: |
+          grep -q 'kind: HorizontalPodAutoscaler' rendered.yaml
+          grep -q 'minReplicas: 2' rendered.yaml
+          grep -q 'maxReplicas: 6' rendered.yaml
+          grep -q 'name: cpu' rendered.yaml
+          grep -q 'name: memory' rendered.yaml
+      - name: Собрать мониторинг
+        run: kubectl kustomize monitoring > monitoring-rendered.yaml
+      - name: Проверить JSON Grafana
+        run: python -m json.tool monitoring/grafana/tradingmaster-safety.json > /dev/null
+      - name: Проверить результат сборки
+        shell: bash
+        run: test -s rendered.yaml && test -s monitoring-rendered.yaml
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Установить Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.8
+      - name: Проверить форматирование
+        run: terraform fmt -check -recursive infra
+      - name: Инициализировать bootstrap
+        run: terraform -chdir=infra/bootstrap init -backend=false
+      - name: Проверить bootstrap
+        run: terraform -chdir=infra/bootstrap validate
+      - name: Инициализировать инфраструктуру
+        run: terraform -chdir=infra/terraform init -backend=false
+      - name: Проверить инфраструктуру
+        run: terraform -chdir=infra/terraform validate

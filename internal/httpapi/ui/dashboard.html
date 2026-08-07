@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="csrf-token" content="{{.CSRF}}">
+  <title>TradingMaster — Панель управления</title>
+  <link rel="stylesheet" href="/ui/assets/app.css">
+  <script defer src="/ui/assets/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/ui" aria-label="TradingMaster — главная">
+      <span class="brand-mark" aria-hidden="true">TM</span>
+      <span><strong>TradingMaster</strong><small>версия {{.Version}}</small></span>
+    </a>
+    <div class="topbar-actions">
+      <span id="last-update" class="muted">Загрузка данных…</span>
+      <button id="refresh" class="button button-secondary" type="button">Обновить</button>
+      <button id="logout" class="button button-quiet" type="button">Выйти</button>
+    </div>
+  </header>
+
+  <main class="page-shell">
+    <section class="live-warning" aria-label="Статус реальной торговли">
+      <span class="status-dot status-safe" aria-hidden="true"></span>
+      <div><strong>Реальная торговля отключена</strong><p>Публичные live-котировки используются только для shadow-сигналов. Заявки доступны лишь для виртуального paper-счёта и Binance Spot Testnet; реальные средства не используются.</p></div>
+      <span class="pill pill-safe">LIVE OFF</span>
+    </section>
+
+    <section aria-labelledby="overview-title">
+      <div class="section-heading">
+        <div><p class="eyebrow">Обзор</p><h1 id="overview-title">Состояние системы</h1></div>
+        <p id="global-message" class="muted" role="status" aria-live="polite"></p>
+      </div>
+      <div class="status-grid">
+        <article class="status-card"><span class="card-label">Сервис</span><strong id="service-state">—</strong><small id="service-mode">—</small></article>
+        <article class="status-card"><span class="card-label">Kill switch</span><strong id="kill-state">—</strong><small id="kill-reason">—</small></article>
+        <article class="status-card"><span class="card-label">Хранилище защиты</span><strong id="store-state">—</strong><small>Общее состояние между репликами</small></article>
+        <article class="status-card"><span class="card-label">Paper trading</span><strong id="paper-state">—</strong><small>Виртуальный портфель</small></article>
+        <article class="status-card"><span class="card-label">Binance Testnet</span><strong id="testnet-state">—</strong><small id="testnet-mode">—</small></article>
+        <article class="status-card"><span class="card-label">Shadow trading</span><strong id="shadow-state">—</strong><small id="shadow-mode">Публичные котировки, без заявок</small></article>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="safety-title">
+      <div class="panel-heading"><div><p class="eyebrow">Безопасность</p><h2 id="safety-title">Аварийная остановка и дневной лимит</h2></div><span id="safety-pill" class="pill">Загрузка</span></div>
+      <div class="safety-layout">
+        <dl class="metric-list">
+          <div><dt>Текущий капитал</dt><dd id="current-equity">—</dd></div>
+          <div><dt>Капитал на начало дня</dt><dd id="start-equity">—</dd></div>
+          <div><dt>Убыток за день</dt><dd id="daily-loss">—</dd></div>
+          <div><dt>Допустимый лимит</dt><dd id="daily-limit">—</dd></div>
+        </dl>
+        <form id="kill-form" class="action-form">
+          <label for="kill-reason-input">Причина аварийной остановки</label>
+          <input id="kill-reason-input" name="reason" type="text" maxlength="240" placeholder="Например: проверка риск-лимитов">
+          <div class="button-row">
+            <button class="button button-danger" type="submit" value="activate">Активировать kill switch</button>
+            <button class="button button-secondary" type="submit" value="deactivate">Снять ручную блокировку</button>
+          </div>
+          <small>Дневную блокировку нельзя снять вручную — она сбрасывается правилами safety-store.</small>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="shadow-title">
+      <div class="panel-heading">
+        <div><p class="eyebrow">Наблюдение за реальным рынком</p><h2 id="shadow-title">Shadow trading</h2></div>
+        <span id="shadow-pill" class="pill">Загрузка</span>
+      </div>
+      <div id="shadow-disabled" class="notice" hidden>Shadow trading отключён. Для него нужен PostgreSQL и TM_SHADOW_ENABLED=true.</div>
+      <div id="shadow-content">
+        <div class="shadow-summary">
+          <dl class="metric-list compact">
+            <div><dt>WebSocket</dt><dd id="shadow-connected">—</dd></div>
+            <div><dt>Символы и интервал</dt><dd id="shadow-symbols">—</dd></div>
+            <div><dt>Последняя свеча</dt><dd id="shadow-last-candle">—</dd></div>
+          </dl>
+          <div class="zero-orders">
+            <span class="status-dot status-safe" aria-hidden="true"></span>
+            <div><strong>Отправлено заявок: <span id="shadow-orders-sent">0</span></strong><p>Контур только рассчитывает сигналы. Интерфейса отправки заявок у него нет.</p></div>
+          </div>
+        </div>
+        <h3>Последние решения стратегии</h3>
+        <div class="table-wrap"><table><thead><tr><th>Свеча</th><th>Инструмент</th><th>Цена</th><th>Решение</th><th>Причина</th><th>Допуск</th><th>Заявка</th></tr></thead><tbody id="shadow-signals"></tbody></table></div>
+      </div>
+    </section>
+
+    <div class="two-column">
+      <section class="panel" aria-labelledby="paper-title">
+        <div class="panel-heading"><div><p class="eyebrow">Без риска</p><h2 id="paper-title">Paper trading</h2></div><span id="paper-pill" class="pill">Загрузка</span></div>
+        <div id="paper-disabled" class="notice" hidden>Paper trading отключён. Для него нужен durable PostgreSQL.</div>
+        <div id="paper-content">
+          <dl class="metric-list compact">
+            <div><dt>Капитал</dt><dd id="paper-equity">—</dd></div>
+            <div><dt>Свободные средства</dt><dd id="paper-cash">—</dd></div>
+            <div><dt>Позиций</dt><dd id="paper-position-count">—</dd></div>
+          </dl>
+          <form id="paper-order-form" class="form-grid">
+            <h3>Новая виртуальная заявка</h3>
+            <label>Инструмент<input name="symbol" value="BTCUSDT" required pattern="[A-Za-z0-9._-]+"></label>
+            <label>Сторона<select name="side"><option value="buy">Купить</option><option value="sell">Продать</option></select></label>
+            <label>Количество<input name="quantity" type="number" min="0" step="any" required></label>
+            <label>Рыночная цена<input name="market_price" type="number" min="0" step="any" required></label>
+            <button class="button button-primary form-wide" type="submit">Отправить в paper broker</button>
+          </form>
+          <form id="paper-mark-form" class="form-grid compact-form">
+            <h3>Обновить виртуальную цену</h3>
+            <label>Инструмент<input name="symbol" value="BTCUSDT" required></label>
+            <label>Цена<input name="price" type="number" min="0" step="any" required></label>
+            <button class="button button-secondary form-wide" type="submit">Переоценить портфель</button>
+          </form>
+          <h3>Открытые позиции</h3>
+          <div class="table-wrap"><table><thead><tr><th>Инструмент</th><th>Количество</th><th>Средняя цена</th><th>Текущая цена</th><th>PnL</th></tr></thead><tbody id="paper-positions"></tbody></table></div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="testnet-title">
+        <div class="panel-heading"><div><p class="eyebrow">Песочница биржи</p><h2 id="testnet-title">Binance Spot Testnet</h2></div><span id="testnet-pill" class="pill">Загрузка</span></div>
+        <div id="testnet-disabled" class="notice" hidden>Testnet отключён. Нужны durable PostgreSQL и тестовые API-ключи.</div>
+        <div id="testnet-content">
+          <dl class="metric-list compact">
+            <div><dt>Соединение</dt><dd id="testnet-connected">—</dd></div>
+            <div><dt>Право торговли</dt><dd id="testnet-can-trade">—</dd></div>
+            <div><dt>Режим заявок</dt><dd id="testnet-order-mode">—</dd></div>
+          </dl>
+          <form id="testnet-order-form" class="form-grid">
+            <h3>Тестовая заявка</h3>
+            <label class="form-wide">Ключ идемпотентности<input id="idempotency-key" name="idempotency_key" required minlength="8" maxlength="64"></label>
+            <label>Инструмент<input name="symbol" value="BTCUSDT" required></label>
+            <label>Сторона<select name="side"><option value="buy">Купить</option><option value="sell">Продать</option></select></label>
+            <label>Тип<select id="testnet-order-type" name="order_type"><option value="market">Market</option><option value="limit">Limit</option></select></label>
+            <label>Количество<input name="quantity" inputmode="decimal" placeholder="0.001" required></label>
+            <label id="testnet-price-field" class="form-wide" hidden>Цена<input name="price" inputmode="decimal" placeholder="50000"></label>
+            <button class="button button-primary form-wide" type="submit">Отправить в Testnet</button>
+          </form>
+          <h3>Тестовые балансы</h3>
+          <div class="table-wrap"><table><thead><tr><th>Актив</th><th>Свободно</th><th>Заблокировано</th></tr></thead><tbody id="testnet-balances"></tbody></table></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel" aria-labelledby="orders-title">
+      <div class="panel-heading"><div><p class="eyebrow">Аудит</p><h2 id="orders-title">Последние заявки</h2></div></div>
+      <div class="order-columns">
+        <div><h3>Paper trading</h3><div class="table-wrap"><table><thead><tr><th>Время</th><th>Инструмент</th><th>Сторона</th><th>Количество</th><th>Статус</th></tr></thead><tbody id="paper-orders"></tbody></table></div></div>
+        <div><h3>Binance Testnet</h3><div class="table-wrap"><table><thead><tr><th>Время</th><th>Инструмент</th><th>Тип</th><th>Статус</th><th>Действие</th></tr></thead><tbody id="testnet-orders"></tbody></table></div></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

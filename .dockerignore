@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.vscode
+bin
+data
+deploy
+docs
+infra
+monitoring
+*.md
+!THIRD_PARTY_NOTICES.md
+*.tfstate*

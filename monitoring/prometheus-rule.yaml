@@ -1,0 +1,76 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tradingmaster-safety
+  namespace: tradingmaster
+  labels:
+    app.kubernetes.io/name: tradingmaster
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: tradingmaster.safety
+      rules:
+        - alert: TradingMasterKillSwitchActive
+          expr: max(tradingmaster_kill_switch_active) == 1
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "TradingMaster: kill switch активен"
+            description: "Новые торговые позиции заблокированы. Проверьте причину через защищённый safety API."
+        - alert: TradingMasterDailyLossNearLimit
+          expr: max(tradingmaster_daily_loss_ratio) / clamp_min(max(tradingmaster_daily_loss_limit_ratio), 0.000001) >= 0.8
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: дневной убыток приблизился к лимиту"
+            description: "Использовано не менее 80% настроенного дневного лимита убытка."
+        - alert: TradingMasterTelegramDeliveryFailed
+          expr: sum(increase(tradingmaster_telegram_notifications_total{status="failed"}[5m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: ошибка Telegram-уведомления"
+            description: "Хотя бы одно safety-уведомление не было доставлено в Telegram за последние 5 минут."
+        - alert: TradingMasterSafetyStoreIsNotDurable
+          expr: min(tradingmaster_safety_store_durable) == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "TradingMaster: durable safety-store отключён"
+            description: "Хотя бы один экземпляр использует локальный safety-state. Paper trading и масштабирование небезопасны."
+        - alert: TradingMasterPaperOrderErrors
+          expr: sum(increase(tradingmaster_paper_orders_total{status="error"}[5m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: ошибки paper broker"
+            description: "За последние 5 минут paper broker не смог обработать хотя бы одну заявку."
+        - alert: TradingMasterTestnetOrderUnknown
+          expr: sum(increase(tradingmaster_testnet_orders_total{status="unknown"}[5m])) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "TradingMaster: состояние testnet-заявки неизвестно"
+            description: "Ответ matching engine оказался неоднозначным. Запустите reconciliation по ключу идемпотентности."
+        - alert: TradingMasterTestnetOrderErrors
+          expr: sum(increase(tradingmaster_testnet_orders_total{status="error"}[5m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: ошибка адаптера тестовой биржи"
+            description: "За последние 5 минут адаптер Binance Spot Testnet не смог обработать хотя бы одну заявку."
+        - alert: TradingMasterShadowDisconnected
+          expr: max(tradingmaster_shadow_enabled) == 1 and max(tradingmaster_shadow_connected) == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TradingMaster: shadow-поток отключён"
+            description: "Shadow trading включён, но ни один экземпляр не видит подключённый публичный Binance WebSocket."

@@ -1,0 +1,20 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tradingmaster
+  namespace: tradingmaster
+  labels:
+    app.kubernetes.io/name: tradingmaster
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - tradingmaster
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tradingmaster
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 5s
